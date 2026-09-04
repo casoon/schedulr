@@ -1,7 +1,8 @@
 use crate::batch::build_internal;
 use crate::model::{
     Activity, ActivityId, Assignment, Conflict, ConflictSeverity, EntityRef, Participant,
-    ParticipantId, ProposedActivity, Resource, ResourceId, ResourceRequirement,
+    ParticipantId, ProposedActivity, Resource, ResourceId, ResourcePool, ResourcePoolId,
+    ResourceRequirement,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use unifier::constraint::Assignment as UnifierAssignment;
@@ -11,6 +12,7 @@ use unifier::constraint::Assignment as UnifierAssignment;
 pub struct SchedulingState {
     resources: BTreeMap<ResourceId, Resource>,
     participants: BTreeMap<ParticipantId, Participant>,
+    resource_pools: BTreeMap<ResourcePoolId, ResourcePool>,
     committed: BTreeMap<ActivityId, (Activity, Assignment)>,
     activities_by_resource: BTreeMap<ResourceId, BTreeSet<ActivityId>>,
     activities_by_participant: BTreeMap<ParticipantId, BTreeSet<ActivityId>>,
@@ -21,6 +23,7 @@ impl SchedulingState {
     pub fn new(
         resources: impl IntoIterator<Item = Resource>,
         participants: impl IntoIterator<Item = Participant>,
+        resource_pools: impl IntoIterator<Item = ResourcePool>,
     ) -> Self {
         Self {
             resources: resources
@@ -30,6 +33,10 @@ impl SchedulingState {
             participants: participants
                 .into_iter()
                 .map(|participant| (participant.id(), participant))
+                .collect(),
+            resource_pools: resource_pools
+                .into_iter()
+                .map(|pool| (pool.id, pool))
                 .collect(),
             committed: BTreeMap::new(),
             activities_by_resource: BTreeMap::new(),
@@ -65,8 +72,10 @@ impl SchedulingState {
 
         let mut relevant = BTreeSet::new();
         for requirement in proposal.requirements() {
-            if let Some(activities) = self.activities_by_resource.get(&requirement.resource()) {
-                relevant.extend(activities);
+            for resource in self.matching_resources(requirement) {
+                if let Some(activities) = self.activities_by_resource.get(&resource) {
+                    relevant.extend(activities);
+                }
             }
         }
         for participant in proposal.participants() {
@@ -89,7 +98,9 @@ impl SchedulingState {
 
         let resources: Vec<Resource> = self.resources.values().cloned().collect();
         let participants: Vec<Participant> = self.participants.values().cloned().collect();
-        let compiled = match build_internal(&resources, &participants, &activities) {
+        let resource_pools: Vec<ResourcePool> = self.resource_pools.values().cloned().collect();
+        let compiled = match build_internal(&resources, &participants, &activities, &resource_pools)
+        {
             Ok(compiled) => compiled,
             Err(error) => {
                 return error
@@ -194,10 +205,12 @@ impl SchedulingState {
 
     fn add_to_indexes(&mut self, activity: &Activity) {
         for requirement in activity.requirements() {
-            self.activities_by_resource
-                .entry(requirement.resource())
-                .or_default()
-                .insert(activity.id());
+            for resource in self.matching_resources(requirement) {
+                self.activities_by_resource
+                    .entry(resource)
+                    .or_default()
+                    .insert(activity.id());
+            }
         }
         for &participant in activity.participants() {
             self.activities_by_participant
@@ -209,8 +222,10 @@ impl SchedulingState {
 
     fn remove_from_indexes(&mut self, activity: &Activity) {
         for requirement in activity.requirements() {
-            if let Some(activities) = self.activities_by_resource.get_mut(&requirement.resource()) {
-                activities.remove(&activity.id());
+            for resource in self.matching_resources(requirement) {
+                if let Some(activities) = self.activities_by_resource.get_mut(&resource) {
+                    activities.remove(&activity.id());
+                }
             }
         }
         for participant in activity.participants() {
@@ -218,6 +233,32 @@ impl SchedulingState {
                 activities.remove(&activity.id());
             }
         }
+    }
+
+    fn matching_resources(&self, requirement: &ResourceRequirement) -> Vec<ResourceId> {
+        self.resources
+            .values()
+            .filter(|resource| {
+                requirement
+                    .exact_resource()
+                    .is_none_or(|id| id == resource.id())
+                    && requirement
+                        .resource_type()
+                        .is_none_or(|kind| kind == resource.resource_type())
+                    && resource.capacity() >= requirement.minimum_capacity()
+                    && requirement
+                        .required_features()
+                        .is_subset(resource.features())
+                    && (requirement.candidates().is_empty()
+                        || requirement.candidates().contains(&resource.id()))
+                    && requirement.pool().is_none_or(|pool| {
+                        self.resource_pools
+                            .get(&pool)
+                            .is_some_and(|pool| pool.resources.contains(&resource.id()))
+                    })
+            })
+            .map(Resource::id)
+            .collect()
     }
 }
 
@@ -227,10 +268,7 @@ fn copy_activity_with_window(activity: &Activity, window: crate::TimeWindow) -> 
         copy = copy.with_participant(participant);
     }
     for requirement in activity.requirements() {
-        copy = copy.with_requirement(ResourceRequirement::new(
-            requirement.resource(),
-            requirement.units(),
-        ));
+        copy = copy.with_requirement(requirement.clone());
     }
     copy
 }
@@ -242,5 +280,34 @@ fn model_conflict(message: impl Into<String>) -> Conflict {
         involved: Vec::new(),
         entity: None::<EntityRef>,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_requirements_are_indexed_only_under_pool_members() {
+        let member = Resource::new(ResourceId(1), "member", 1);
+        let outside = Resource::new(ResourceId(2), "outside", 1);
+        let pool = ResourcePool::new(ResourcePoolId(1), "rooms", [member.id()]);
+        let mut state = SchedulingState::new([member, outside], [], [pool]);
+
+        state
+            .commit(
+                ProposedActivity::new("pooled", crate::TimeWindow::new(0, 1))
+                    .with_requirement(ResourceRequirement::from_pool(ResourcePoolId(1), 1)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .activities_by_resource
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ResourceId(1)]
+        );
     }
 }

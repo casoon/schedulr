@@ -1,6 +1,6 @@
 [package]
 name = "schedulr"
-version = "0.1.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Scheduling framework (activity/resource/interval DSL) built on unifier"
@@ -11,4 +11,4 @@ keywords = ["scheduling", "timetabling", "planning"]
 categories = ["algorithms", "mathematics"]
 
 [dependencies]
-unifier = { version = "0.1.0", path = "../unifier" }
+unifier = { version = "0.3.1", path = "../unifier" }

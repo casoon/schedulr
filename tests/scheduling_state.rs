@@ -10,6 +10,7 @@ fn state() -> SchedulingState {
             Participant::new(ParticipantId(1), "Alex"),
             Participant::new(ParticipantId(2), "Blair"),
         ],
+        [],
     )
 }
 

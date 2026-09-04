@@ -6,25 +6,29 @@ model and solvers, which in turn build on
 [`pathwise`](https://github.com/casoon/pathwise)'s generic search and
 optimization traits.
 
-```
+```text
 pathwise → unifier → schedulr → (application: timetabling, appointment booking, ...)
 ```
 
 ## Status
 
-Version 0.1 is implemented. It provides:
+Version 0.8 is implemented. It provides:
 
 - domain-neutral `Resource`, `Participant`, `Activity`, `Assignment`,
   `Score`, and structured `Conflict` types without exposing solver internals;
 - synchronous create/move/cancel/participant-update checks through
   `SchedulingState`, including self-exclusion when moving an activity;
-- a minimal `compile` → `solve` → `explain` batch path for hard resource
-  conflicts.
+- resource matching by type, capacity and feature, named resource and participant
+  pools, and hierarchical/overlapping participant groups;
+- periodic slot calendars with absolute exceptions and lexicographic
+  Strong/Medium/Weak score components;
+- `compile` → `solve` plus `analyze`, `evaluate_move`, `suggest`, `compare`,
+  `explain`, and baseline-aware `repair` paths.
 
 The single-activity path evaluates only constraints affected by the proposed
-change and does not start a solver search. Persistence, recurring calendars,
-repair modes, and richer score categories remain application or later-version
-concerns; see `plan/02-umsetzungsplan.md`.
+change and does not start a solver search. Persistence remains an application
+concern; solutions carry score components so applications can store them with
+their immutable schedule versions.
 
 ## Problem class
 
@@ -49,6 +53,7 @@ use schedulr::{
 let mut state = SchedulingState::new(
     [Resource::new(ResourceId(1), "room", 1)],
     [Participant::new(ParticipantId(1), "Alex")],
+    [],
 );
 
 let proposal = ProposedActivity::new("appointment", TimeWindow::new(10, 20))
@@ -95,7 +100,9 @@ if result.status != SolveStatus::Feasible {
 
 ## Installation
 
-Not published to crates.io yet.
+```toml
+schedulr = "0.8"
+```
 
 ## License
 
