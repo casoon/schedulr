@@ -53,6 +53,7 @@ pub struct Resource {
     attributes: BTreeMap<String, String>,
     resource_type: String,
     features: BTreeSet<String>,
+    unavailable_ranges: Vec<(i64, i64)>,
 }
 
 impl Resource {
@@ -65,6 +66,7 @@ impl Resource {
             attributes: BTreeMap::new(),
             resource_type: "resource".to_string(),
             features: BTreeSet::new(),
+            unavailable_ranges: Vec::new(),
         }
     }
 
@@ -85,6 +87,13 @@ impl Resource {
 
     pub fn with_feature(mut self, feature: impl Into<String>) -> Self {
         self.features.insert(feature.into());
+        self
+    }
+
+    /// Marks `[start, end]` (inclusive) as a time range this resource cannot be booked in,
+    /// e.g. a gym only usable 08–16 (AllowedTime: forbid the hours outside that window).
+    pub fn with_unavailable_range(mut self, start: i64, end: i64) -> Self {
+        self.unavailable_ranges.push((start, end));
         self
     }
 
@@ -114,6 +123,10 @@ impl Resource {
 
     pub fn features(&self) -> &BTreeSet<String> {
         &self.features
+    }
+
+    pub fn unavailable_ranges(&self) -> &[(i64, i64)] {
+        &self.unavailable_ranges
     }
 }
 
@@ -145,6 +158,7 @@ pub struct Participant {
     id: ParticipantId,
     name: String,
     attributes: BTreeMap<String, String>,
+    unavailable_ranges: Vec<(i64, i64)>,
 }
 
 /// Domain-neutral participant group. Memberships are stored separately so groups can overlap.
@@ -219,11 +233,19 @@ impl Participant {
             id,
             name: name.into(),
             attributes: BTreeMap::new(),
+            unavailable_ranges: Vec::new(),
         }
     }
 
     pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.attributes.insert(key.into(), value.into());
+        self
+    }
+
+    /// Marks `[start, end]` (inclusive) as a time range this participant is unavailable in,
+    /// e.g. a teacher not available on Tuesdays (Availability).
+    pub fn with_unavailable_range(mut self, start: i64, end: i64) -> Self {
+        self.unavailable_ranges.push((start, end));
         self
     }
 
@@ -233,6 +255,10 @@ impl Participant {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn unavailable_ranges(&self) -> &[(i64, i64)] {
+        &self.unavailable_ranges
     }
 
     pub fn attributes(&self) -> &BTreeMap<String, String> {
@@ -617,6 +643,9 @@ impl SlotTemplate {
     }
 }
 
+/// A recurring break within a day (e.g. lunch, recess). `window` is
+/// day-relative, like [`SlotTemplate::offset`]. No activity may be placed so
+/// that it overlaps a break; see [`ScheduleTemplate::allowed_starts_for`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BreakTemplate {
     pub name: String,
@@ -682,13 +711,25 @@ impl ScheduleTemplate {
     }
 
     pub fn allowed_starts_for(&self, duration: u64) -> BTreeSet<i64> {
+        let duration = duration as i64;
         self.days
             .iter()
             .flat_map(|day| {
                 day.slots
                     .iter()
-                    .filter(move |slot| slot.duration >= duration)
-                    .map(move |slot| day.day_offset.saturating_add(slot.offset))
+                    .filter(move |slot| slot.duration as i64 >= duration)
+                    .filter_map(move |slot| {
+                        let start = day.day_offset.saturating_add(slot.offset);
+                        let end = start.saturating_add(duration);
+                        let blocked = day.breaks.iter().any(|break_template| {
+                            let break_start =
+                                day.day_offset.saturating_add(break_template.window.start);
+                            let break_end =
+                                day.day_offset.saturating_add(break_template.window.end);
+                            start < break_end && break_start < end
+                        });
+                        (!blocked).then_some(start)
+                    })
             })
             .collect()
     }
@@ -729,6 +770,38 @@ impl ScoreRule {
             activity,
             weight,
             kind: ScoreRuleKind::PreferWindow(window),
+        }
+    }
+}
+
+/// A hard temporal relation between two activities' start times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityRelation {
+    /// `first` and `second` start at exactly the same time (SameTime).
+    SameStart,
+    /// `first` and `second` must not overlap in time (DifferentTime).
+    NoOverlap,
+    /// `second` starts exactly when `first` ends, no gap allowed (Consecutive).
+    Consecutive,
+    /// `first` ends at least `min_gap` time units before `second` starts (Precedence).
+    Precedence { min_gap: i64 },
+}
+
+/// Ties two activities together with an [`ActivityRelation`]. Unlike [`ScoreRule`], this is a
+/// hard constraint: the solver never produces a solution that violates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityRelationConstraint {
+    pub first: ActivityId,
+    pub second: ActivityId,
+    pub relation: ActivityRelation,
+}
+
+impl ActivityRelationConstraint {
+    pub const fn new(first: ActivityId, second: ActivityId, relation: ActivityRelation) -> Self {
+        Self {
+            first,
+            second,
+            relation,
         }
     }
 }
@@ -797,6 +870,7 @@ pub struct SchedulingProblem {
     pub academic_period: Option<AcademicPeriod>,
     pub schedule_template: Option<ScheduleTemplate>,
     pub score_rules: Vec<ScoreRule>,
+    pub relations: Vec<ActivityRelationConstraint>,
 }
 
 impl SchedulingProblem {
@@ -816,6 +890,7 @@ impl SchedulingProblem {
             academic_period: None,
             schedule_template: None,
             score_rules: Vec::new(),
+            relations: Vec::new(),
         }
     }
 
@@ -851,6 +926,11 @@ impl SchedulingProblem {
 
     pub fn with_score_rule(mut self, rule: ScoreRule) -> Self {
         self.score_rules.push(rule);
+        self
+    }
+
+    pub fn with_relation(mut self, relation: ActivityRelationConstraint) -> Self {
+        self.relations.push(relation);
         self
     }
 }

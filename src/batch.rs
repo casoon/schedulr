@@ -1,9 +1,9 @@
 use crate::model::{
-    Activity, ActivityId, Assignment, CompileError, Conflict, ConflictSeverity, EntityRef,
-    GroupMember, Participant, ParticipantGroupId, ParticipantId, ParticipantRequirement, Resource,
-    ResourceId, ResourcePool, ResourceRequirement, SchedulingProblem, Score, ScoreComponent,
-    ScoreLevel, ScoreRule, ScoreRuleKind, Solution, SolveResult, SolveStatistics, SolveStatus,
-    TimeWindow,
+    Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict, ConflictSeverity,
+    EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId, ParticipantRequirement,
+    Resource, ResourceId, ResourcePool, ResourceRequirement, SchedulingProblem, Score,
+    ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, Solution, SolveResult, SolveStatistics,
+    SolveStatus, TimeWindow,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use unifier::solver::{
     BacktrackingSolver, BranchAndBoundSolver, SolveOutcome, SolveStatus as UnifierSolveStatus,
     SolverOptions,
 };
-use unifier::{ModelBuilder, VariableId};
+use unifier::{ForbiddenValues, ModelBuilder, VariableId};
 
 #[derive(Debug)]
 pub struct CompiledProblem {
@@ -178,12 +178,14 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
             }
         }
 
+        let interval_start = interval.start();
         let mut compiled = builder.new_activity(activity.name(), interval);
         for requirement in activity.requirements() {
             let candidates = resolve_requirement(problem, requirement);
             if candidates.len() == 1 && requirement.exact_resource().is_some() {
                 let resource = candidates[0];
                 compiled.require_resource(resource_map[&resource], requirement.units());
+                apply_resource_calendar(&mut builder, problem, interval_start, resource);
                 fixed_resources
                     .entry(activity.id())
                     .or_default()
@@ -192,14 +194,16 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                 flexible_requirements.push((activity.id(), requirement.clone(), candidates));
             }
         }
-        for participant in activity.participants() {
-            compiled.require_resource(participant_map[participant], 1);
+        for &participant in activity.participants() {
+            compiled.require_resource(participant_map[&participant], 1);
+            apply_participant_calendar(&mut builder, problem, interval_start, participant);
         }
         for requirement in activity.participant_requirements() {
             let candidates = resolve_participant_requirement(problem, requirement);
             if candidates.len() == 1 && requirement.exact_participant().is_some() {
                 let participant = candidates[0];
                 compiled.require_resource(participant_map[&participant], 1);
+                apply_participant_calendar(&mut builder, problem, interval_start, participant);
                 fixed_participants
                     .entry(activity.id())
                     .or_default()
@@ -224,6 +228,29 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         .zip(&compiled_activities)
         .map(|(domain, compiled)| (domain.id(), compiled))
         .collect();
+    for relation in &problem.relations {
+        let first_interval = compiled_by_activity[&relation.first].interval();
+        let second_interval = compiled_by_activity[&relation.second].interval();
+        match relation.relation {
+            ActivityRelation::SameStart => {
+                builder.add_equal(first_interval.start(), second_interval.start(), 0);
+            }
+            ActivityRelation::Consecutive => {
+                builder.add_equal(first_interval.end(), second_interval.start(), 0);
+            }
+            ActivityRelation::Precedence { min_gap } => {
+                builder.add_precedence(first_interval, second_interval, min_gap);
+            }
+            ActivityRelation::NoOverlap => {
+                let first_duration = duration_of(&expanded_activities, relation.first);
+                let second_duration = duration_of(&expanded_activities, relation.second);
+                builder.add_no_overlap(
+                    &[first_interval.clone(), second_interval.clone()],
+                    &[first_duration, second_duration],
+                );
+            }
+        }
+    }
     let mut flexible_tasks: BTreeMap<ResourceId, Vec<SelectedTask>> = BTreeMap::new();
     for (activity_id, requirement, candidates) in flexible_requirements {
         let presences = candidates
@@ -237,6 +264,13 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                 .or_default()
                 .push((resource, presence));
             let interval = compiled_by_activity[&activity_id].interval();
+            apply_optional_resource_calendar(
+                &mut builder,
+                problem,
+                interval.start(),
+                resource,
+                presence,
+            );
             flexible_tasks
                 .entry(resource)
                 .or_default()
@@ -270,6 +304,13 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                 .or_default()
                 .push((participant, presence));
             let interval = compiled_by_activity[&activity_id].interval();
+            apply_optional_participant_calendar(
+                &mut builder,
+                problem,
+                interval.start(),
+                participant,
+                presence,
+            );
             flexible_participant_tasks
                 .entry(participant)
                 .or_default()
@@ -744,6 +785,26 @@ fn validate_input(problem: &SchedulingProblem) -> Vec<String> {
             ));
         }
     }
+    for relation in &problem.relations {
+        if !seen_activities.contains(&relation.first) {
+            errors.push(format!(
+                "activity relation references unknown activity {}",
+                relation.first
+            ));
+        }
+        if !seen_activities.contains(&relation.second) {
+            errors.push(format!(
+                "activity relation references unknown activity {}",
+                relation.second
+            ));
+        }
+        if relation.first == relation.second {
+            errors.push(format!(
+                "activity relation cannot relate activity {} to itself",
+                relation.first
+            ));
+        }
+    }
     errors
 }
 
@@ -812,6 +873,94 @@ fn resolve_participant_requirement(
         })
         .map(Participant::id)
         .collect()
+}
+
+/// Restricts `start` to avoid `resource`'s unavailable ranges (AllowedTime), unconditionally —
+/// for use where `resource` is guaranteed to be booked for the activity.
+fn apply_resource_calendar(
+    builder: &mut ModelBuilder,
+    problem: &SchedulingProblem,
+    start: VariableId,
+    resource: ResourceId,
+) {
+    if let Some(found) = problem
+        .resources
+        .iter()
+        .find(|candidate| candidate.id() == resource)
+    {
+        let ranges = found.unavailable_ranges();
+        if !ranges.is_empty() {
+            builder.add_calendar(start, ranges);
+        }
+    }
+}
+
+/// Restricts `start` to avoid `participant`'s unavailable ranges (Availability), unconditionally —
+/// for use where `participant` is guaranteed to attend the activity.
+fn apply_participant_calendar(
+    builder: &mut ModelBuilder,
+    problem: &SchedulingProblem,
+    start: VariableId,
+    participant: ParticipantId,
+) {
+    if let Some(found) = problem
+        .participants
+        .iter()
+        .find(|candidate| candidate.id() == participant)
+    {
+        let ranges = found.unavailable_ranges();
+        if !ranges.is_empty() {
+            builder.add_calendar(start, ranges);
+        }
+    }
+}
+
+/// Restricts `start` to avoid `resource`'s unavailable ranges (AllowedTime), but only if
+/// `resource` is the one actually selected for the activity (`presence`).
+fn apply_optional_resource_calendar(
+    builder: &mut ModelBuilder,
+    problem: &SchedulingProblem,
+    start: VariableId,
+    resource: ResourceId,
+    presence: VariableId,
+) {
+    if let Some(found) = problem
+        .resources
+        .iter()
+        .find(|candidate| candidate.id() == resource)
+    {
+        let ranges = found.unavailable_ranges();
+        if !ranges.is_empty() {
+            let forbidden = ranges
+                .iter()
+                .flat_map(|&(range_start, range_end)| range_start..=range_end);
+            builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence);
+        }
+    }
+}
+
+/// Restricts `start` to avoid `participant`'s unavailable ranges (Availability), but only if
+/// `participant` is the one actually selected for the activity (`presence`).
+fn apply_optional_participant_calendar(
+    builder: &mut ModelBuilder,
+    problem: &SchedulingProblem,
+    start: VariableId,
+    participant: ParticipantId,
+    presence: VariableId,
+) {
+    if let Some(found) = problem
+        .participants
+        .iter()
+        .find(|candidate| candidate.id() == participant)
+    {
+        let ranges = found.unavailable_ranges();
+        if !ranges.is_empty() {
+            let forbidden = ranges
+                .iter()
+                .flat_map(|&(range_start, range_end)| range_start..=range_end);
+            builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence);
+        }
+    }
 }
 
 fn expand_group_participants(
@@ -1088,4 +1237,11 @@ fn score_from_unifier(score: unifier::HardSoftScore) -> Score {
 
 fn duration_as_i64(duration: u64) -> i64 {
     i64::try_from(duration).unwrap_or(i64::MAX)
+}
+
+fn duration_of(activities: &[Activity], id: ActivityId) -> u64 {
+    activities
+        .iter()
+        .find(|activity| activity.id() == id)
+        .map_or(0, Activity::duration)
 }

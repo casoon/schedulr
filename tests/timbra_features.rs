@@ -1,9 +1,10 @@
 use schedulr::{
-    AcademicPeriod, Activity, ActivityId, AssignmentChange, DayTemplate, GroupMembership,
-    Participant, ParticipantGroup, ParticipantGroupId, ParticipantId, ParticipantPool,
-    ParticipantPoolId, ParticipantRequirement, RepairOptions, Resource, ResourceId, ResourcePool,
-    ResourcePoolId, ResourceRequirement, ScheduleTemplate, SchedulingProblem, ScoreLevel,
-    ScoreRule, SlotTemplate, SolveStatus, TimeWindow, compare, compile,
+    AcademicPeriod, Activity, ActivityId, ActivityRelation, ActivityRelationConstraint,
+    AssignmentChange, BreakTemplate, DayTemplate, GroupMembership, Participant, ParticipantGroup,
+    ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
+    RepairOptions, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,
+    ScheduleTemplate, SchedulingProblem, ScoreLevel, ScoreRule, SlotTemplate, SolveStatus,
+    TimeWindow, compare, compile,
 };
 use std::time::Duration;
 
@@ -150,6 +151,151 @@ fn periodic_calendar_handles_cycles_and_absolute_exceptions() {
 
     let solution = compile(&problem).unwrap().solve().solution.unwrap();
     assert_eq!(solution.assignments[0].window.start, 11);
+}
+
+#[test]
+fn break_template_blocks_activities_that_would_overlap_it() {
+    // "first" (offset 0, duration 1) overlaps the 0..2 break; "second"
+    // (offset 2, duration 1) starts right after it, so only offset 2 remains.
+    let template = ScheduleTemplate::new(10).with_day(
+        DayTemplate::new(0)
+            .with_slot(SlotTemplate::new("first", 0, 1))
+            .with_slot(SlotTemplate::new("second", 2, 1))
+            .with_break(BreakTemplate {
+                name: "Pause".to_string(),
+                window: TimeWindow::new(0, 2),
+            }),
+    );
+    let activity = Activity::new(ActivityId(1), "after the break", TimeWindow::new(0, 4), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![activity]).with_calendar(
+        AcademicPeriod {
+            window: TimeWindow::new(0, 4),
+        },
+        template,
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(solution.assignments[0].window.start, 2);
+}
+
+#[test]
+fn resource_unavailable_range_blocks_the_early_slot() {
+    // AllowedTime via a fixed (exact) resource requirement: the gym is unavailable
+    // 0..=3, so the earliest usable start is 4, not the naive earliest, 0.
+    let gym = Resource::new(ResourceId(1), "Sporthalle", 1).with_unavailable_range(0, 3);
+    let activity = Activity::new(ActivityId(1), "Sport", TimeWindow::new(0, 10), 1)
+        .with_requirement(ResourceRequirement::new(ResourceId(1), 1));
+    let problem = SchedulingProblem::new(vec![gym], vec![], vec![activity]);
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(solution.assignments[0].window.start, 4);
+}
+
+#[test]
+fn participant_availability_makes_the_solver_pick_the_other_candidate() {
+    // Availability via a flexible participant requirement: the only feasible slot
+    // (start 0) is unavailable for Krüger, so the solver must pick Bauer instead —
+    // proving the calendar restriction is applied per-candidate, not globally.
+    let unavailable = Participant::new(ParticipantId(1), "Krüger").with_unavailable_range(0, 0);
+    let available = Participant::new(ParticipantId(2), "Bauer");
+    let activity = Activity::new(ActivityId(1), "Mathe", TimeWindow::new(0, 1), 1)
+        .with_participant_requirement(
+            ParticipantRequirement::matching()
+                .with_candidate(ParticipantId(1))
+                .with_candidate(ParticipantId(2)),
+        );
+    let problem = SchedulingProblem::new(vec![], vec![unavailable, available], vec![activity]);
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(solution.assignments[0].participants, vec![ParticipantId(2)]);
+}
+
+#[test]
+fn same_start_relation_forces_two_unrelated_activities_to_align() {
+    // Activity 1 is pinned to start 3; activity 2 is otherwise free (and would
+    // naturally start at 0). SameStart must drag it to 3 instead.
+    let pinned = Activity::new(ActivityId(1), "pinned", TimeWindow::new(3, 4), 1);
+    let free = Activity::new(ActivityId(2), "free", TimeWindow::new(0, 5), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![pinned, free]).with_relation(
+        ActivityRelationConstraint::new(ActivityId(1), ActivityId(2), ActivityRelation::SameStart),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    let free_start = solution
+        .assignments
+        .iter()
+        .find(|assignment| assignment.activity == ActivityId(2))
+        .unwrap()
+        .window
+        .start;
+    assert_eq!(free_start, 3);
+}
+
+#[test]
+fn consecutive_relation_starts_the_second_activity_exactly_when_the_first_ends() {
+    let first = Activity::new(ActivityId(1), "theory", TimeWindow::new(0, 2), 2);
+    let second = Activity::new(ActivityId(2), "lab", TimeWindow::new(0, 10), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(
+            ActivityId(1),
+            ActivityId(2),
+            ActivityRelation::Consecutive,
+        ),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    let second_start = solution
+        .assignments
+        .iter()
+        .find(|assignment| assignment.activity == ActivityId(2))
+        .unwrap()
+        .window
+        .start;
+    assert_eq!(second_start, 2);
+}
+
+#[test]
+fn precedence_relation_enforces_a_minimum_gap() {
+    let first = Activity::new(ActivityId(1), "theory", TimeWindow::new(0, 1), 1);
+    let second = Activity::new(ActivityId(2), "lab", TimeWindow::new(0, 10), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(
+            ActivityId(1),
+            ActivityId(2),
+            ActivityRelation::Precedence { min_gap: 3 },
+        ),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    let second_start = solution
+        .assignments
+        .iter()
+        .find(|assignment| assignment.activity == ActivityId(2))
+        .unwrap()
+        .window
+        .start;
+    assert_eq!(second_start, 4);
+}
+
+#[test]
+fn no_overlap_relation_keeps_two_unrelated_activities_apart() {
+    // Neither activity shares a resource or participant, so nothing else would
+    // stop them from occupying the same slot; only the relation does.
+    let first = Activity::new(ActivityId(1), "assembly", TimeWindow::new(0, 2), 2);
+    let second = Activity::new(ActivityId(2), "free period", TimeWindow::new(0, 10), 2);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(ActivityId(1), ActivityId(2), ActivityRelation::NoOverlap),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    let second_start = solution
+        .assignments
+        .iter()
+        .find(|assignment| assignment.activity == ActivityId(2))
+        .unwrap()
+        .window
+        .start;
+    assert_eq!(second_start, 2);
 }
 
 #[test]
