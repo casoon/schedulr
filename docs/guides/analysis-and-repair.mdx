@@ -1,0 +1,83 @@
+---
+title: Analysis and repair
+description: Explain why a problem has no plan, estimate pressure before solving, evaluate a manual move, compare two plans, and repair a plan with as few changes as possible.
+order: 5
+---
+
+All of these work on a `CompiledProblem`, the result of `compile`.
+
+## Solving
+
+`solve()` uses plain backtracking when the problem has no score rules and branch and bound when
+it has some. It uses unifier's default solver options, which include a time limit of ten
+seconds; a search that hits the limit returns `SolveStatus::Aborted` with the best solution found
+so far, if any. `statistics` reports the expanded nodes, the elapsed time and whether the result
+is proven optimal.
+
+## explain
+
+`explain(&result)` returns an empty list for a result with a solution. For an infeasible result
+it evaluates the constraints on every activity whose start is already fixed by its window and
+reports the violated ones. For flexible requirements it also checks whether the candidate
+resources could hold all activities even if every alternative were used, and reports
+`AlternativeResourceCapacity` when they cannot.
+
+```text
+Blocking AlternativeResourceCapacity [a1, a2, a3]: Room Aurora: capacity 1 is insufficient for the unresolved alternatives
+```
+
+`explain` finds conflicts that are visible from fixed windows and capacities. It does not compute
+a minimal set of conflicting constraints for every infeasible problem.
+
+## analyze
+
+`analyze()` estimates pressure without solving. For each resource and participant it compares the
+required time (duration times units, spread evenly over the candidate resources of a flexible
+requirement) with the available time over the horizon (the academic period, or the span of all
+activity windows). The result is a list of `Bottleneck`s sorted by utilisation, and a
+`feasibility_percent` of 100 divided by the highest utilisation, capped at 100. A value below 100
+means at least one resource or person is overbooked on paper.
+
+## evaluate_move and suggest
+
+`evaluate_move(&solution, activity, window)` checks moving one activity of a solution to a new
+window. The window must keep the activity's duration and stay inside its allowed window. The
+`MoveEvaluation` contains:
+
+- `is_feasible` and the blocking `hard_violations`,
+- advisory `warnings`,
+- `score_delta`, the score change the move would cause,
+- `explanations`, the conflict messages as text.
+
+`suggest(&solution, window)` runs `evaluate_move` for every activity and returns the feasible
+ones, best score delta first: "which activity could go into this free slot?".
+
+## compare
+
+`compare(&before, &after)` is a free function. It lists every `AssignmentChange` (`Added`,
+`Removed` or `Changed`, with the assignment before and after) and the `score_delta` between two
+solutions, for example to show a reviewer what a re-plan changed.
+
+## repair
+
+`repair(&baseline, &options)` re-solves after the problem changed (a room became smaller, an
+activity was added) and tries to keep the baseline:
+
+- every activity of the baseline gets a `Strong` rule that penalises a start different from its
+  baseline start by `change_penalty`;
+- a large neighbourhood search (LNS) starts from the baseline, repeatedly frees a fraction of the
+  activities and re-solves them, until `time_limit`.
+
+```rust
+use schedulr::RepairOptions;
+use std::time::Duration;
+
+let repaired = compiled.repair(&baseline, &RepairOptions {
+    time_limit: Duration::from_millis(100),
+    ..RepairOptions::default()
+});
+```
+
+The defaults are `change_penalty: 1_000_000`, `destroy_fraction: 0.3` and a time limit of one
+second. Because the stability rules sit on the `Strong` level, they outweigh all `Medium` and
+`Weak` preferences; your own `Strong` rules compete with them through their weights.

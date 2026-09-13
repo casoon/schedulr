@@ -1,0 +1,15 @@
+1. Two fixed lab sessions overlap in the same lab, with the same trainer
+   Status: Infeasible
+   Blocking NoOverlap [a1, a2]: Lab 1: Intervals [9, 11) and [10, 12) overlap
+   Advisory NoOverlap [a1, a2]: Chris: Intervals [9, 11) and [10, 12) overlap
+
+2. Three sessions at 09:00 need a room, but there are only two rooms
+   Status: Infeasible
+   Blocking AlternativeResourceCapacity [a1, a2, a3]: Room Aurora: capacity 1 is insufficient for the unresolved alternatives
+   Blocking AlternativeResourceCapacity [a1, a2, a3]: Room Birch: capacity 1 is insufficient for the unresolved alternatives
+
+3. Invalid input is rejected before any solving
+   CompileError: resource r1 has zero capacity
+   CompileError: activity a1 has an invalid time window
+   CompileError: activity a2 requires unknown resource r9
+   CompileError: duplicate activity id a2

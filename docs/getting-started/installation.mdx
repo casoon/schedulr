@@ -1,0 +1,50 @@
+---
+title: Installation
+description: schedulr is a Rust library on crates.io. It depends only on unifier, which Cargo pulls in automatically.
+order: 1
+---
+
+## Add the crate
+
+```sh
+cargo add schedulr
+
+# or, in Cargo.toml
+[dependencies]
+schedulr = "0.8"
+```
+
+## Requirements
+
+| Requirement | Value |
+| --- | --- |
+| Rust | 1.87 or newer (`rust-version` in `Cargo.toml`) |
+| Edition | 2024 |
+| Dependencies | `unifier` 0.3.1 |
+
+schedulr has no feature flags and no optional dependencies.
+
+<Callout>
+  Breaks, availability ranges and activity relations are on the master branch and not in the
+  0.8.0 release. They will ship with the next release; the pages that describe them say so.
+</Callout>
+
+## Working from a checkout
+
+The repository's `Cargo.toml` points at a local unifier checkout for development
+(`unifier = { version = "0.3.1", path = "../unifier" }`). To build schedulr from source, clone
+both repositories next to each other:
+
+```sh
+git clone https://github.com/casoon/unifier
+git clone https://github.com/casoon/schedulr
+cd schedulr
+cargo test
+```
+
+The example programs run the same way, for instance `cargo run --example booking_desk`. Their
+captured output is what the [showcase](../../../showcase/) displays.
+
+## Next steps
+
+Continue with the [Quickstart](../quickstart/) to solve a first problem.

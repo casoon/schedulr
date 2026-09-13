@@ -1,0 +1,15 @@
+1. Book a consultation with Alex, 10:00-11:00
+   committed as a0
+2. Check a second consultation in the same room, 10:30-11:30
+   Blocking NoOverlap [a0, a1]: Consulting room: Intervals [600, 660) and [630, 690) overlap
+   Advisory NoOverlap [a0, a1]: Alex: Intervals [600, 660) and [630, 690) overlap
+3. Book a call for Blair without a room, 10:00-11:00
+   committed as a1
+4. Add Blair to the consultation
+   Advisory NoOverlap [a0, a1]: Blair: Intervals [600, 660) and [600, 660) overlap
+   committed anyway: advisory conflicts do not block (a0)
+5. Move the consultation to 10:30-11:30
+   no conflicts
+   a0 now runs 10:30-11:30
+6. Cancel Blair's call
+   1 activity left in the state

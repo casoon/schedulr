@@ -6,6 +6,8 @@ model and solvers, which in turn build on
 [`pathwise`](https://github.com/casoon/pathwise)'s generic search and
 optimization traits.
 
+**Website and documentation:** [casoon.github.io/schedulr](https://casoon.github.io/schedulr/)
+
 ```text
 pathwise → unifier → schedulr → (application: timetabling, appointment booking, ...)
 ```
