@@ -128,7 +128,8 @@ invalid windows, unknown references and empty candidate sets are collected into 
 ## The solution
 
 `solve()` returns a `SolveResult` with a `status` (`Feasible`, `Infeasible` or `Aborted`), an
-optional `Solution` and `statistics`. A `Solution` holds one `Assignment` per activity (window,
+optional `Solution` and `statistics`. On the master branch (unreleased), `Aborted` carries an
+`AbortReason`: `Cancelled`, `Timeout`, `NodeLimit` or `LocalOptimum`. A `Solution` holds one `Assignment` per activity (window,
 chosen resources, participants), the aggregated `Score` and one `ScoreComponent` per score rule.
 
 The [workshop plan](../../../showcase/workshop-plan/) in the showcase puts all of the above
