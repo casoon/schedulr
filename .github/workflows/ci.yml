@@ -15,6 +15,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Cargo.toml points unifier at ../unifier for local development next to the unifier
+      # repository. The runner has no such checkout, so drop the path and build against the
+      # published crate the version requirement names, as `cargo publish` does.
+      - name: Use unifier from crates.io
+        run: |
+          sed -i -E 's|^unifier = \{ version = "([^"]+)", path = "\.\./unifier" \}$|unifier = "\1"|' Cargo.toml
+          if grep -n 'path = "../unifier"' Cargo.toml; then echo "unifier path dependency not removed" >&2; exit 1; fi
+          grep -n '^unifier' Cargo.toml
       - run: cargo build --all-targets
       - run: cargo test --all-targets
       - run: cargo fmt --check
