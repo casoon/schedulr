@@ -1,6 +1,6 @@
 use schedulr::{
-    Activity, ActivityId, ConflictSeverity, Resource, ResourceId, ResourceRequirement,
-    SchedulingProblem, SolveStatus, TimeWindow, compile,
+    AbortReason, Activity, ActivityId, CancellationToken, ConflictSeverity, Resource, ResourceId,
+    ResourceRequirement, SchedulingProblem, SolveOptions, SolveStatus, TimeWindow, compile,
 };
 
 #[test]
@@ -44,4 +44,29 @@ fn batch_solver_returns_domain_assignments() {
     let result = compiled.solve();
     assert_eq!(result.status, SolveStatus::Feasible);
     assert_eq!(result.solution.unwrap().assignments.len(), 2);
+}
+
+#[test]
+fn solve_with_an_already_cancelled_token_aborts_instead_of_searching() {
+    let room = Resource::new(ResourceId(1), "Room", 1);
+    let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 5), 2)
+        .with_requirement(ResourceRequirement::new(room.id(), 1));
+    let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 5), 2)
+        .with_requirement(ResourceRequirement::new(room.id(), 1));
+    let compiled = compile(&SchedulingProblem::new(
+        vec![room],
+        vec![],
+        vec![first, second],
+    ))
+    .expect("problem compiles");
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let result = compiled.solve_with(&SolveOptions {
+        cancellation_token: Some(token),
+        ..SolveOptions::default()
+    });
+
+    assert_eq!(result.status, SolveStatus::Aborted(AbortReason::Cancelled));
+    assert!(result.solution.is_none());
 }

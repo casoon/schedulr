@@ -1,23 +1,46 @@
 use crate::model::{
-    Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict, ConflictSeverity,
-    EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId, ParticipantRequirement,
-    Resource, ResourceId, ResourcePool, ResourceRequirement, SchedulingProblem, Score,
-    ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, Solution, SolveResult, SolveStatistics,
-    SolveStatus, TimeWindow,
+    AbortReason, Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict,
+    ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
+    ParticipantRequirement, Resource, ResourceId, ResourcePool, ResourceRequirement,
+    SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, Solution,
+    SolveResult, SolveStatistics, SolveStatus, TimeWindow,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 use unifier::constraint::{
     Assignment as UnifierAssignment, Constraint, Explanation, PropagationResult,
 };
 use unifier::model::domain::{Domain, TrailedDomains};
 use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
 use unifier::score::{Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel};
+pub use unifier::solver::CancellationToken;
 use unifier::solver::{
-    BacktrackingSolver, BranchAndBoundSolver, SolveOutcome, SolveStatus as UnifierSolveStatus,
-    SolverOptions,
+    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, SolveOutcome,
+    SolveStatus as UnifierSolveStatus, SolverOptions,
 };
 use unifier::{ForbiddenValues, ModelBuilder, VariableId};
+
+/// Parameters controlling one [`CompiledProblem::solve_with`] run: how long to search and
+/// how to interrupt it early. `solve()` is a convenience default of this with no
+/// cancellation and a 10 second time limit — the same default `unifier`'s own
+/// `SolverOptions` uses.
+#[derive(Debug, Clone)]
+pub struct SolveOptions {
+    /// Maximum duration to search. `None` means no time limit.
+    pub time_limit: Option<Duration>,
+    /// Handle a caller can use to interrupt the search from another thread/task.
+    pub cancellation_token: Option<CancellationToken>,
+}
+
+impl Default for SolveOptions {
+    fn default() -> Self {
+        Self {
+            time_limit: Some(Duration::from_secs(10)),
+            cancellation_token: None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct CompiledProblem {
@@ -49,12 +72,24 @@ pub fn compile(problem: &SchedulingProblem) -> Result<CompiledProblem, CompileEr
 }
 
 impl CompiledProblem {
+    /// Solves with a 10 second time limit and no cancellation. Use
+    /// [`CompiledProblem::solve_with`] to control the time limit or to pass a
+    /// [`CancellationToken`] the caller can cancel from elsewhere.
     pub fn solve(&self) -> SolveResult {
-        let options = SolverOptions::default();
+        self.solve_with(&SolveOptions::default())
+    }
+
+    /// Solves under the given [`SolveOptions`] (time limit, cancellation).
+    pub fn solve_with(&self, options: &SolveOptions) -> SolveResult {
+        let solver_options = SolverOptions {
+            time_limit: options.time_limit,
+            cancellation_token: options.cancellation_token.clone(),
+            ..SolverOptions::default()
+        };
         let outcome = if self.internal.graph.objectives().is_empty() {
-            BacktrackingSolver::new().solve(&self.internal.graph, &options)
+            BacktrackingSolver::new().solve(&self.internal.graph, &solver_options)
         } else {
-            BranchAndBoundSolver::new().solve(&self.internal.graph, &options)
+            BranchAndBoundSolver::new().solve(&self.internal.graph, &solver_options)
         };
         self.internal.solve_result(outcome)
     }
@@ -500,7 +535,7 @@ impl InternalCompiled {
         let status = match outcome.status {
             UnifierSolveStatus::Optimal | UnifierSolveStatus::Feasible => SolveStatus::Feasible,
             UnifierSolveStatus::Infeasible => SolveStatus::Infeasible,
-            UnifierSolveStatus::Aborted(_) => SolveStatus::Aborted,
+            UnifierSolveStatus::Aborted(reason) => SolveStatus::Aborted(abort_reason(reason)),
         };
         let solution = outcome
             .solution
@@ -1232,6 +1267,15 @@ fn score_from_unifier(score: unifier::HardSoftScore) -> Score {
         medium: score.medium,
         weak: score.weak,
         soft: score.soft,
+    }
+}
+
+fn abort_reason(reason: UnifierAbortReason) -> AbortReason {
+    match reason {
+        UnifierAbortReason::Cancelled => AbortReason::Cancelled,
+        UnifierAbortReason::Timeout => AbortReason::Timeout,
+        UnifierAbortReason::NodeLimit => AbortReason::NodeLimit,
+        UnifierAbortReason::LocalOptimum => AbortReason::LocalOptimum,
     }
 }
 

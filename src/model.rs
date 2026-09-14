@@ -962,7 +962,23 @@ impl std::error::Error for CompileError {}
 pub enum SolveStatus {
     Feasible,
     Infeasible,
-    Aborted,
+    Aborted(AbortReason),
+}
+
+/// Why a solve run stopped without reaching a conclusive result — mirrors
+/// `unifier::solver::AbortReason`, kept as a distinct type here so callers never need to
+/// depend on `unifier` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbortReason {
+    /// The caller's [`crate::CancellationToken`] was cancelled.
+    Cancelled,
+    /// The configured time limit elapsed.
+    Timeout,
+    /// The configured search node limit was reached.
+    NodeLimit,
+    /// A local-search-style solver reached a local optimum with no improving move
+    /// available. This does not prove infeasibility or optimality.
+    LocalOptimum,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
