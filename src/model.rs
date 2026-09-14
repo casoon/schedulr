@@ -1025,6 +1025,62 @@ impl MinimumBreak {
     }
 }
 
+/// A problem-level soft preference, contrasted with the activity-scoped [`ScoreRule`].
+///
+/// Every goal contributes to its [`ScoreLevel`] tier with its `weight`, and its contribution is
+/// reported in [`Solution::score_components`] under `category` (with `activity == None`, since the
+/// goal is not owned by a single activity). This lets a caller display exactly the goals it
+/// configured and how much each one currently costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftGoalKind {
+    /// Minimise free time (unoccupied spans) between one participant's assignments inside each
+    /// period bucket.
+    MinimizeParticipantIdle,
+    /// Minimise free time between the aggregate occupancy of one participant group inside each
+    /// period bucket. Occupancy is the union of the assignments of all members of the group.
+    MinimizeGroupIdle,
+    /// Prefer a stable resource assignment: occurrences that share an activity name should use as
+    /// few distinct resources as possible.
+    RoomStability,
+    /// Spread occurrences that share an activity name across the period buckets instead of
+    /// clustering several of them in the same bucket.
+    SpreadActivityOverDays,
+}
+
+/// One problem-level soft goal.
+///
+/// Unlike [`ScoreRule`] this is not tied to a single activity: it applies to the whole
+/// [`SchedulingProblem`] and is added through [`SchedulingProblem::with_soft_goal`]. The penalty a
+/// goal accumulates always reduces the soft score, so a larger `weight` makes the goal dominate
+/// other goals at the same [`ScoreLevel`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    /// Lexicographic level the contribution is scored at.
+    pub level: ScoreLevel,
+    /// Multiplier applied to the goal's accumulated penalty (non-negative by convention).
+    pub weight: i64,
+    /// Which global preference this goal expresses.
+    pub kind: SoftGoalKind,
+}
+
+impl SoftGoal {
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        weight: i64,
+        kind: SoftGoalKind,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            weight,
+            kind,
+        }
+    }
+}
+
 impl ProposedActivity {
     pub fn new(name: impl Into<String>, window: TimeWindow) -> Self {
         Self {
@@ -1094,6 +1150,7 @@ pub struct SchedulingProblem {
     pub minimum_breaks: Vec<MinimumBreak>,
     /// Allowed block shapes for groups of activities (plan 25, C1).
     pub bucket_load_patterns: Vec<BucketLoadPattern>,
+    pub soft_goals: Vec<SoftGoal>,
 }
 
 impl SchedulingProblem {
@@ -1117,6 +1174,7 @@ impl SchedulingProblem {
             maximum_daily_loads: Vec::new(),
             minimum_breaks: Vec::new(),
             bucket_load_patterns: Vec::new(),
+            soft_goals: Vec::new(),
         }
     }
 
@@ -1191,6 +1249,12 @@ impl SchedulingProblem {
     /// allowed shape) is ignored rather than rejected — see [`BucketLoadPattern::is_active`].
     pub fn with_bucket_load_pattern(mut self, pattern: BucketLoadPattern) -> Self {
         self.bucket_load_patterns.push(pattern);
+        self
+    }
+
+    /// Adds a problem-level soft goal scored at its own level and reported under its category.
+    pub fn with_soft_goal(mut self, goal: SoftGoal) -> Self {
+        self.soft_goals.push(goal);
         self
     }
 }

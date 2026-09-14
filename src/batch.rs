@@ -2,8 +2,8 @@ use crate::model::{
     AbortReason, Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict,
     ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
     ParticipantRequirement, Resource, ResourceId, ResourcePool, ResourceRequirement,
-    SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, Solution,
-    SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_windows,
+    SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SoftGoal,
+    SoftGoalKind, Solution, SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_windows,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -518,6 +518,22 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         );
     }
 
+    // Problem-level soft goals: like score rules these are scored objectives, but they span the
+    // whole problem instead of one activity.
+    for goal in &problem.soft_goals {
+        let objective = soft_goal_objective(
+            problem,
+            goal,
+            &expanded_activities,
+            &variables,
+            &fixed_resources,
+            &fixed_participants,
+            &selected_resources,
+            &selected_participants,
+        );
+        builder.add_scored_objective(&goal.category, score_level(goal.level), objective);
+    }
+
     let graph = builder.build().map_err(|model_errors| {
         CompileError::new(model_errors.into_iter().map(|e| e.to_string()).collect())
     })?;
@@ -598,10 +614,14 @@ impl InternalCompiled {
                 category: objective.category().to_string(),
                 level: public_score_level(objective.level()),
                 value: objective.evaluate(assignment),
-                activity: objective
-                    .scope()
-                    .iter()
-                    .find_map(|variable| self.activity_by_variable.get(variable).copied()),
+                activity: if is_problem_level_objective(objective.as_ref()) {
+                    None
+                } else {
+                    objective
+                        .scope()
+                        .iter()
+                        .find_map(|variable| self.activity_by_variable.get(variable).copied())
+                },
             })
             .collect()
     }
@@ -1562,4 +1582,442 @@ fn duration_of(activities: &[Activity], id: ActivityId) -> u64 {
         .iter()
         .find(|activity| activity.id() == id)
         .map_or(0, Activity::duration)
+}
+
+/// [`Objective::name`] shared by every problem-level soft goal. Besides serving as the fallback
+/// category it marks an objective as problem-level, which [`InternalCompiled::score_components`]
+/// uses to report `activity == None` for it.
+const SOFT_GOAL_OBJECTIVE_NAME: &str = "ProblemSoftGoal";
+
+/// Builds the single [`Objective`] implementing one problem-level [`SoftGoal`].
+///
+/// All four kinds are answered by the same primitives the hard rules use: the period buckets come
+/// from [`load_bucket_ranges`], participant tasks from [`load_tasks_for`], and resource selections
+/// from the compiled presence variables. The objective sits behind
+/// [`unifier::dsl::ModelBuilder::add_scored_objective`] so `category`/`level` are taken from the
+/// goal.
+#[allow(clippy::too_many_arguments)]
+fn soft_goal_objective(
+    problem: &SchedulingProblem,
+    goal: &SoftGoal,
+    activities: &[Activity],
+    variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
+    fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
+    fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+) -> Arc<dyn Objective> {
+    match goal.kind {
+        SoftGoalKind::MinimizeParticipantIdle => {
+            let ranges = load_bucket_ranges(problem, activities);
+            let tracks = problem
+                .participants
+                .iter()
+                .map(|participant| {
+                    load_tasks_for(
+                        problem,
+                        activities,
+                        variables,
+                        fixed_resources,
+                        fixed_participants,
+                        selected_resources,
+                        selected_participants,
+                        EntityRef::Participant(participant.id()),
+                    )
+                })
+                .collect();
+            Arc::new(IdleObjective::new(goal.weight, tracks, ranges))
+        }
+        SoftGoalKind::MinimizeGroupIdle => {
+            let ranges = load_bucket_ranges(problem, activities);
+            let memberships = group_memberships(problem);
+            let tracks = problem
+                .participant_groups
+                .iter()
+                .map(|group| {
+                    let members = group_member_participants(group.id, &memberships);
+                    activities
+                        .iter()
+                        .filter(|activity| {
+                            members.iter().any(|member| {
+                                participant_is_assigned(
+                                    activity,
+                                    *member,
+                                    fixed_participants,
+                                    selected_participants,
+                                )
+                            })
+                        })
+                        .filter_map(|activity| {
+                            let (start, _) = variables.get(&activity.id()).copied()?;
+                            Some(BucketedTask::new(
+                                start,
+                                duration_as_i64(activity.duration()),
+                                1,
+                            ))
+                        })
+                        .collect()
+                })
+                .collect();
+            Arc::new(IdleObjective::new(goal.weight, tracks, ranges))
+        }
+        SoftGoalKind::RoomStability => {
+            let groups = activities_by_name(activities, variables, |activity, _| {
+                let mut entries: Vec<(ResourceId, Option<VariableId>)> = Vec::new();
+                if let Some(resources) = fixed_resources.get(&activity.id()) {
+                    entries.extend(resources.iter().map(|&resource| (resource, None)));
+                }
+                if let Some(candidates) = selected_resources.get(&activity.id()) {
+                    entries.extend(
+                        candidates
+                            .iter()
+                            .map(|&(resource, presence)| (resource, Some(presence))),
+                    );
+                }
+                entries
+            });
+            Arc::new(RoomStabilityObjective::new(goal.weight, groups))
+        }
+        SoftGoalKind::SpreadActivityOverDays => {
+            let ranges = load_bucket_ranges(problem, activities);
+            let groups = activities_by_name(activities, variables, |_, start| start);
+            Arc::new(SpreadObjective::new(goal.weight, groups, ranges))
+        }
+    }
+}
+
+/// Groups activities that share a name, in name order, applying `payload` to each occurrence
+/// together with its start variable. Activities without a compiled interval are skipped.
+fn activities_by_name<T>(
+    activities: &[Activity],
+    variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
+    payload: impl Fn(&Activity, VariableId) -> T,
+) -> Vec<Vec<T>> {
+    let mut groups: BTreeMap<String, Vec<T>> = BTreeMap::new();
+    for activity in activities {
+        let Some(&(start, _)) = variables.get(&activity.id()) else {
+            continue;
+        };
+        groups
+            .entry(activity.name().to_string())
+            .or_default()
+            .push(payload(activity, start));
+    }
+    groups.into_values().collect()
+}
+
+/// Penalty of `amount` scaled by `weight`, expressed as a soft-score contribution (never positive
+/// for a non-negative weight, since solvers maximise the soft score).
+fn soft_penalty(weight: i64, amount: i64) -> i64 {
+    amount.saturating_mul(weight).saturating_neg()
+}
+
+/// Optimistic (never-underestimating) bound for a [`soft_penalty`] contribution. For a
+/// non-negative weight the contribution is at most `0`; a negative weight would make the
+/// contribution positive, so no finite bound below `i64::MAX` is sound and pruning is disabled
+/// instead.
+fn soft_optimistic_bound(weight: i64) -> i64 {
+    if weight < 0 { i64::MAX } else { 0 }
+}
+
+/// The bucket a value falls in, per the half-open [`BucketRange`]s produced by
+/// [`load_bucket_ranges`].
+fn bucket_of(ranges: &[BucketRange], value: i64) -> Option<usize> {
+    ranges
+        .iter()
+        .find(|range| range.start <= value && value < range.end)
+        .map(|range| range.bucket)
+}
+
+/// Total free time between consecutive occupied intervals of one track inside each bucket. Only
+/// present tasks with an assigned start contribute; intervals overlapping a bucket boundary are
+/// attributed to their start's bucket, mirroring how [`load_bucket_ranges`] segments a horizon.
+fn track_idle(
+    track: &[BucketedTask],
+    ranges: &[BucketRange],
+    assignment: &HashMap<VariableId, i64>,
+) -> i64 {
+    let mut per_bucket: BTreeMap<usize, Vec<(i64, i64)>> = BTreeMap::new();
+    for task in track {
+        if let Some(presence) = task.presence
+            && assignment.get(&presence) != Some(&1)
+        {
+            continue;
+        }
+        let Some(&start) = assignment.get(&task.start) else {
+            continue;
+        };
+        let Some(bucket) = bucket_of(ranges, start) else {
+            continue;
+        };
+        per_bucket
+            .entry(bucket)
+            .or_default()
+            .push((start, start.saturating_add(task.duration)));
+    }
+    let mut idle = 0i64;
+    for intervals in per_bucket.values_mut() {
+        intervals.sort_unstable();
+        let mut cursor = intervals[0].1;
+        for &(start, end) in &intervals[1..] {
+            if start > cursor {
+                idle = idle.saturating_add(start - cursor);
+            }
+            cursor = cursor.max(end);
+        }
+    }
+    idle
+}
+
+/// Minimises free time between a participant's (or a group's aggregated) assignments.
+#[derive(Debug, Clone)]
+struct IdleObjective {
+    weight: i64,
+    /// One track per participant or group; each entry is an occupied interval.
+    tracks: Vec<Vec<BucketedTask>>,
+    ranges: Vec<BucketRange>,
+    scope: Vec<VariableId>,
+}
+
+impl IdleObjective {
+    fn new(weight: i64, tracks: Vec<Vec<BucketedTask>>, ranges: Vec<BucketRange>) -> Self {
+        let mut scope = Vec::new();
+        for track in &tracks {
+            for task in track {
+                scope.push(task.start);
+                if let Some(presence) = task.presence {
+                    scope.push(presence);
+                }
+            }
+        }
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            weight,
+            tracks,
+            ranges,
+            scope,
+        }
+    }
+}
+
+impl Objective for IdleObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let mut idle = 0i64;
+        for track in &self.tracks {
+            idle = idle.saturating_add(track_idle(track, &self.ranges, assignment));
+        }
+        soft_penalty(self.weight, idle)
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        soft_optimistic_bound(self.weight)
+    }
+}
+
+/// Minimises the number of distinct resources used by occurrences sharing an activity name, over
+/// and above the single resource such a group can be reduced to.
+///
+/// Outer vec: one entry per activity name. Middle vec: one entry per occurrence. Inner vec: the
+/// `(resource, selection variable)` pairs each occurrence may use.
+type ResourceSelections = Vec<Vec<Vec<(ResourceId, Option<VariableId>)>>>;
+
+#[derive(Debug, Clone)]
+struct RoomStabilityObjective {
+    weight: i64,
+    /// Group -> occurrence -> `(resource, selection variable)`. A `None` selection variable marks
+    /// a resource the activity requires unconditionally.
+    groups: ResourceSelections,
+    scope: Vec<VariableId>,
+}
+
+impl RoomStabilityObjective {
+    fn new(weight: i64, groups: ResourceSelections) -> Self {
+        let mut scope = Vec::new();
+        for group in &groups {
+            for occurrence in group {
+                for &(_, presence) in occurrence {
+                    if let Some(presence) = presence {
+                        scope.push(presence);
+                    }
+                }
+            }
+        }
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            weight,
+            groups,
+            scope,
+        }
+    }
+}
+
+impl Objective for RoomStabilityObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let mut instability = 0i64;
+        for group in &self.groups {
+            let mut used = BTreeSet::new();
+            for occurrence in group {
+                for &(resource, presence) in occurrence {
+                    if presence.is_none_or(|presence| assignment.get(&presence) == Some(&1)) {
+                        used.insert(resource);
+                    }
+                }
+            }
+            instability = instability
+                .saturating_add(i64::try_from(used.len().saturating_sub(1)).unwrap_or(i64::MAX));
+        }
+        soft_penalty(self.weight, instability)
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        soft_optimistic_bound(self.weight)
+    }
+}
+
+/// Penalises occurrences of the same activity name that share a period bucket, so the solver
+/// spreads them across buckets instead of clustering them.
+#[derive(Debug, Clone)]
+struct SpreadObjective {
+    weight: i64,
+    /// One group per activity name, holding each occurrence's start variable.
+    groups: Vec<Vec<VariableId>>,
+    ranges: Vec<BucketRange>,
+    scope: Vec<VariableId>,
+}
+
+impl SpreadObjective {
+    fn new(weight: i64, groups: Vec<Vec<VariableId>>, ranges: Vec<BucketRange>) -> Self {
+        let mut scope: Vec<VariableId> = groups.iter().flatten().copied().collect();
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            weight,
+            groups,
+            ranges,
+            scope,
+        }
+    }
+}
+
+impl Objective for SpreadObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let mut collisions = 0i64;
+        for group in &self.groups {
+            let mut per_bucket: BTreeMap<usize, i64> = BTreeMap::new();
+            for &start_var in group {
+                let Some(&start) = assignment.get(&start_var) else {
+                    continue;
+                };
+                let Some(bucket) = bucket_of(&self.ranges, start) else {
+                    continue;
+                };
+                let count = per_bucket.entry(bucket).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+            for count in per_bucket.values() {
+                collisions =
+                    collisions.saturating_add(count.saturating_mul(count.saturating_sub(1)) / 2);
+            }
+        }
+        soft_penalty(self.weight, collisions)
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        soft_optimistic_bound(self.weight)
+    }
+}
+
+/// True when `objective` is one of the problem-level soft goals built by [`soft_goal_objective`].
+fn is_problem_level_objective(objective: &dyn Objective) -> bool {
+    objective.name() == SOFT_GOAL_OBJECTIVE_NAME
+}
+
+/// Participant memberships grouped by their group, mirroring how [`expand_group_participants`]
+/// reads them.
+fn group_memberships(
+    problem: &SchedulingProblem,
+) -> BTreeMap<ParticipantGroupId, Vec<GroupMember>> {
+    let mut memberships: BTreeMap<ParticipantGroupId, Vec<GroupMember>> = BTreeMap::new();
+    for membership in &problem.group_memberships {
+        memberships
+            .entry(membership.group)
+            .or_default()
+            .push(membership.member);
+    }
+    memberships
+}
+
+/// Every participant reachable from `group`, following subgroup memberships. Cycles are tolerated
+/// (each group is visited once) since soft goals are built after input validation.
+fn group_member_participants(
+    group: ParticipantGroupId,
+    memberships: &BTreeMap<ParticipantGroupId, Vec<GroupMember>>,
+) -> BTreeSet<ParticipantId> {
+    let mut participants = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    collect_group_participants(group, memberships, &mut visiting, &mut participants);
+    participants
+}
+
+fn collect_group_participants(
+    group: ParticipantGroupId,
+    memberships: &BTreeMap<ParticipantGroupId, Vec<GroupMember>>,
+    visiting: &mut BTreeSet<ParticipantGroupId>,
+    participants: &mut BTreeSet<ParticipantId>,
+) {
+    if !visiting.insert(group) {
+        return;
+    }
+    for member in memberships.get(&group).into_iter().flatten() {
+        match member {
+            GroupMember::Participant(participant) => {
+                participants.insert(*participant);
+            }
+            GroupMember::Group(subgroup) => {
+                collect_group_participants(*subgroup, memberships, visiting, participants);
+            }
+        }
+    }
+    visiting.remove(&group);
+}
+
+/// Whether `participant` is deterministically assigned to `activity`: fixed outright, or bound
+/// through a single-candidate requirement. Mirrors [`entity_activity_ids`]' participant branch.
+fn participant_is_assigned(
+    activity: &Activity,
+    participant: ParticipantId,
+    fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
+    selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+) -> bool {
+    activity.participants().contains(&participant)
+        || fixed_participants
+            .get(&activity.id())
+            .is_some_and(|participants| participants.contains(&participant))
+        || guaranteed_candidate(selected_participants.get(&activity.id()), participant)
 }

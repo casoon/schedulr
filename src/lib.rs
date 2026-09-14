@@ -19,8 +19,9 @@ pub use model::{
     ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
     ProposedActivity, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,
     ScheduleTemplate, SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule,
-    ScoreRuleKind, SlotTemplate, Solution, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
-    bucket_load_blocks, bucket_load_pattern, bucket_windows, matches_bucket_load_pattern,
+    ScoreRuleKind, SlotTemplate, SoftGoal, SoftGoalKind, Solution, SolveResult, SolveStatistics,
+    SolveStatus, TimeWindow, bucket_load_blocks, bucket_load_pattern, bucket_windows,
+    matches_bucket_load_pattern,
 };
 pub use repair::RepairOptions;
 pub use state::SchedulingState;
