@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::RangeInclusive;
 
 pub const DEFAULT_CAPACITY_DIMENSION: &str = "units";
 
@@ -42,6 +43,21 @@ impl TimeWindow {
     pub fn duration(self) -> Option<u64> {
         u64::try_from(self.end.checked_sub(self.start)?).ok()
     }
+
+    /// The start slots an activity of `duration` may **not** use because it would occupy part of
+    /// this window — the occupancy rule, not the "start inside the range" one.
+    ///
+    /// `[start, start + duration)` touching `[self.start, self.end)`: blocking the single hour 9
+    /// forbids a start at 8 only for a two-hour activity, and forbids 9 for every activity. Because
+    /// the window is half-open, a blocked house is `[s, s + 1)`, never `[s, s + 1]`.
+    pub fn blocked_starts(self, duration: i64) -> RangeInclusive<i64> {
+        self.start.saturating_sub(duration).saturating_add(1)..=self.end.saturating_sub(1)
+    }
+
+    /// `self.blocked_starts(duration).contains(&start)`, for callers that only need to ask.
+    pub fn occupies(self, start: i64, duration: i64) -> bool {
+        self.blocked_starts(duration).contains(&start)
+    }
 }
 
 /// Capacity-constrained entity consumed by activities.
@@ -54,6 +70,7 @@ pub struct Resource {
     resource_type: String,
     features: BTreeSet<String>,
     unavailable_ranges: Vec<(i64, i64)>,
+    blocked_windows: Vec<TimeWindow>,
 }
 
 impl Resource {
@@ -67,6 +84,7 @@ impl Resource {
             resource_type: "resource".to_string(),
             features: BTreeSet::new(),
             unavailable_ranges: Vec::new(),
+            blocked_windows: Vec::new(),
         }
     }
 
@@ -128,6 +146,18 @@ impl Resource {
     pub fn unavailable_ranges(&self) -> &[(i64, i64)] {
         &self.unavailable_ranges
     }
+
+    /// Blocks a whole window instead of a start: no activity may **occupy** any part of it, however
+    /// long it is. Unlike [`Self::with_unavailable_range`] this is duration-aware — see
+    /// [`TimeWindow::blocked_starts`].
+    pub fn with_blocked_window(mut self, window: TimeWindow) -> Self {
+        self.blocked_windows.push(window);
+        self
+    }
+
+    pub fn blocked_windows(&self) -> &[TimeWindow] {
+        &self.blocked_windows
+    }
 }
 
 /// Named set of interchangeable resources.
@@ -159,6 +189,7 @@ pub struct Participant {
     name: String,
     attributes: BTreeMap<String, String>,
     unavailable_ranges: Vec<(i64, i64)>,
+    blocked_windows: Vec<TimeWindow>,
 }
 
 /// Domain-neutral participant group. Memberships are stored separately so groups can overlap.
@@ -234,6 +265,7 @@ impl Participant {
             name: name.into(),
             attributes: BTreeMap::new(),
             unavailable_ranges: Vec::new(),
+            blocked_windows: Vec::new(),
         }
     }
 
@@ -244,8 +276,20 @@ impl Participant {
 
     /// Marks `[start, end]` (inclusive) as a time range this participant is unavailable in,
     /// e.g. a teacher not available on Tuesdays (Availability).
+    ///
+    /// This blocks **starts** inside the range. To forbid occupying the range at all — "the person
+    /// is not bookable in these hours", whatever the activity's length — use
+    /// [`Self::with_blocked_window`] instead.
     pub fn with_unavailable_range(mut self, start: i64, end: i64) -> Self {
         self.unavailable_ranges.push((start, end));
+        self
+    }
+
+    /// Blocks a whole window instead of a start: no activity this participant attends may
+    /// **occupy** any part of it, however long it is. That is what a timetable means by "this
+    /// person is not available in the 3rd period" — see [`TimeWindow::blocked_starts`].
+    pub fn with_blocked_window(mut self, window: TimeWindow) -> Self {
+        self.blocked_windows.push(window);
         self
     }
 
@@ -259,6 +303,10 @@ impl Participant {
 
     pub fn unavailable_ranges(&self) -> &[(i64, i64)] {
         &self.unavailable_ranges
+    }
+
+    pub fn blocked_windows(&self) -> &[TimeWindow] {
+        &self.blocked_windows
     }
 
     pub fn attributes(&self) -> &BTreeMap<String, String> {
@@ -596,6 +644,31 @@ pub struct Solution {
 pub enum ConflictSeverity {
     Blocking,
     Advisory,
+}
+
+/// How a conflict that names a [`Participant`] is reported (plan 26, §1).
+///
+/// The core detects a participant collision either way — this only decides the verdict. The
+/// default keeps the booking-desk semantics: a double-booked person is reported, but accepting
+/// it stays the caller's decision. A domain in which a person physically cannot be in two
+/// places — one teacher, two lessons — opts into [`Self::Blocking`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ParticipantConflictPolicy {
+    /// Report the collision as `Advisory`; the caller decides what to do with it.
+    #[default]
+    Advisory,
+    /// Report the collision as `Blocking`, exactly like a resource collision.
+    Blocking,
+}
+
+impl ParticipantConflictPolicy {
+    /// The severity a `Participant`-named conflict is reported with under this policy.
+    pub const fn severity(self) -> ConflictSeverity {
+        match self {
+            Self::Advisory => ConflictSeverity::Advisory,
+            Self::Blocking => ConflictSeverity::Blocking,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1151,6 +1224,8 @@ pub struct SchedulingProblem {
     /// Allowed block shapes for groups of activities (plan 25, C1).
     pub bucket_load_patterns: Vec<BucketLoadPattern>,
     pub soft_goals: Vec<SoftGoal>,
+    /// How a collision between two activities of the same participant is reported (plan 26, §1).
+    pub participant_conflict_policy: ParticipantConflictPolicy,
 }
 
 impl SchedulingProblem {
@@ -1175,6 +1250,7 @@ impl SchedulingProblem {
             minimum_breaks: Vec::new(),
             bucket_load_patterns: Vec::new(),
             soft_goals: Vec::new(),
+            participant_conflict_policy: ParticipantConflictPolicy::default(),
         }
     }
 
@@ -1255,6 +1331,14 @@ impl SchedulingProblem {
     /// Adds a problem-level soft goal scored at its own level and reported under its category.
     pub fn with_soft_goal(mut self, goal: SoftGoal) -> Self {
         self.soft_goals.push(goal);
+        self
+    }
+
+    /// Decides whether two overlapping activities of the same participant block an arrangement or
+    /// are only reported (plan 26, §1). Defaults to [`ParticipantConflictPolicy::Advisory`], which
+    /// is the previous behaviour, so callers that do not care keep it unchanged.
+    pub fn with_participant_conflict_policy(mut self, policy: ParticipantConflictPolicy) -> Self {
+        self.participant_conflict_policy = policy;
         self
     }
 }

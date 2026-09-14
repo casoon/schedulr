@@ -17,9 +17,16 @@ order: 2
 | `entity` | The `Resource`, `Participant` or `Activity` concerned, if any |
 | `message` | Readable text, prefixed with the resource or participant name |
 
-Conflicts on resources are `Blocking`. Conflicts on participants are `Advisory`: a booking desk
-may accept them. Batch `solve` still treats participant double-booking as a hard constraint and
-never returns a plan with it.
+Conflicts on resources are `Blocking`. Conflicts on participants are `Advisory` by default: a
+booking desk may accept them. Batch `solve` still treats participant double-booking as a hard
+constraint and never returns a plan with it. A problem that cannot tolerate a double-booked person
+says so with `ParticipantConflictPolicy::Blocking` — then a participant conflict is reported
+exactly like a resource conflict (a timetable does this: one teacher cannot be in two lessons).
+
+```rust
+let problem = SchedulingProblem::new(resources, participants, activities)
+    .with_participant_conflict_policy(ParticipantConflictPolicy::Blocking);
+```
 
 ## Constraint names
 

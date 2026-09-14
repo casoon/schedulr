@@ -54,11 +54,14 @@ conflicts are returned by the check but do not block the commit.
 | Conflict on | Severity |
 | --- | --- |
 | a resource (room double-booked, capacity exceeded) | `Blocking` |
-| a participant (person already busy) | `Advisory` |
+| a participant (person already busy) | `Advisory` — or `Blocking` if the problem asks for it |
 | invalid input (unknown activity, invalid window) | `Blocking`, constraint name `Model` |
 
 The distinction is deliberate: a room cannot hold two appointments, but a person can decide to be
-double-booked. Your application decides whether to show a warning or refuse.
+double-booked. Your application decides whether to show a warning or refuse. An application whose
+people *cannot* be in two places at once passes
+`SchedulingProblem::with_participant_conflict_policy(ParticipantConflictPolicy::Blocking)` — see
+[Conflicts and errors](../reference/conflicts.md).
 
 ## Move, change and cancel
 

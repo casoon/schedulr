@@ -84,5 +84,28 @@ For fixed requirements the restriction always applies. For flexible requirements
 matching, candidates) it applies only to the candidate the solver actually selects, so an
 unavailable candidate simply pushes the solver to another one.
 
+### Blocking a window instead of a start
+
+An unavailable range counts the *start* of an activity, so a long activity may still run into it.
+When the meaning is "not bookable in these hours" — a teacher's free day, a hall that opens later —
+say so with `with_blocked_window`, which takes the half-open window the rest of the API uses:
+
+```rust
+use schedulr::{Participant, ParticipantId, TimeWindow};
+
+// The 4th hour is `[3, 4)` — the teacher is not available in it, whatever the lesson's length.
+let ben = Participant::new(ParticipantId(2), "Ben").with_blocked_window(TimeWindow::new(3, 4));
+```
+
+No activity may *occupy* any part of a blocked window. Blocking the single hour `[3, 4)` therefore
+forbids a one-hour lesson at 3, and a two-hour lesson at 2 as well, because that one would run
+through the block. `TimeWindow::blocked_starts(duration)` returns exactly the starts that are
+ruled out (as an inclusive range, the shape `add_calendar` takes) and
+`TimeWindow::occupies(start, duration)` answers the same question for one start.
+
+For fixed requirements a blocked window always applies; for flexible ones only to the selected
+candidate, exactly like an unavailable range. A window of zero length blocks nothing — half-open,
+`[3, 3)` is empty.
+
 The [relations and breaks](../../../showcase/relations-and-breaks/) showcase shows a lunch break
 and Ben's availability in one solved day.

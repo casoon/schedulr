@@ -61,6 +61,8 @@ pub(crate) struct InternalCompiled {
     fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
     selected_capacity_constraints: Vec<(ConstraintId, Arc<SelectedResourceCapacity>)>,
     constraint_entities: HashMap<ConstraintId, EntityRef>,
+    /// Resolved from [`SchedulingProblem::participant_conflict_policy`] once, at compile time.
+    participant_conflict_severity: ConflictSeverity,
     resource_names: BTreeMap<ResourceId, String>,
     participant_names: BTreeMap<ParticipantId, String>,
 }
@@ -221,7 +223,7 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
             if candidates.len() == 1 && requirement.exact_resource().is_some() {
                 let resource = candidates[0];
                 compiled.require_resource(resource_map[&resource], requirement.units());
-                apply_resource_calendar(&mut builder, problem, interval_start, resource);
+                apply_resource_calendar(&mut builder, problem, interval_start, resource, duration);
                 fixed_resources
                     .entry(activity.id())
                     .or_default()
@@ -232,14 +234,26 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         }
         for &participant in activity.participants() {
             compiled.require_resource(participant_map[&participant], 1);
-            apply_participant_calendar(&mut builder, problem, interval_start, participant);
+            apply_participant_calendar(
+                &mut builder,
+                problem,
+                interval_start,
+                participant,
+                duration,
+            );
         }
         for requirement in activity.participant_requirements() {
             let candidates = resolve_participant_requirement(problem, requirement);
             if candidates.len() == 1 && requirement.exact_participant().is_some() {
                 let participant = candidates[0];
                 compiled.require_resource(participant_map[&participant], 1);
-                apply_participant_calendar(&mut builder, problem, interval_start, participant);
+                apply_participant_calendar(
+                    &mut builder,
+                    problem,
+                    interval_start,
+                    participant,
+                    duration,
+                );
                 fixed_participants
                     .entry(activity.id())
                     .or_default()
@@ -306,6 +320,7 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                 interval.start(),
                 resource,
                 presence,
+                duration_as_i64(duration_of(&expanded_activities, activity_id)),
             );
             flexible_tasks
                 .entry(resource)
@@ -346,6 +361,7 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                 interval.start(),
                 participant,
                 presence,
+                duration_as_i64(duration_of(&expanded_activities, activity_id)),
             );
             flexible_participant_tasks
                 .entry(participant)
@@ -552,6 +568,7 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         fixed_participants,
         selected_capacity_constraints,
         constraint_entities,
+        participant_conflict_severity: problem.participant_conflict_policy.severity(),
         resource_names: problem
             .resources
             .iter()
@@ -713,7 +730,7 @@ impl InternalCompiled {
                     .copied();
                 let (severity, entity_name) = match entity {
                     Some(EntityRef::Participant(id)) => (
-                        ConflictSeverity::Advisory,
+                        self.participant_conflict_severity,
                         self.participant_names.get(&id).map(String::as_str),
                     ),
                     Some(EntityRef::Resource(id)) => (
@@ -1053,15 +1070,20 @@ fn apply_resource_calendar(
     problem: &SchedulingProblem,
     start: VariableId,
     resource: ResourceId,
+    duration: i64,
 ) {
     if let Some(found) = problem
         .resources
         .iter()
         .find(|candidate| candidate.id() == resource)
     {
-        let ranges = found.unavailable_ranges();
+        let ranges = forbidden_start_ranges(
+            found.unavailable_ranges(),
+            found.blocked_windows(),
+            duration,
+        );
         if !ranges.is_empty() {
-            builder.add_calendar(start, ranges);
+            builder.add_calendar(start, &ranges);
         }
     }
 }
@@ -1073,15 +1095,20 @@ fn apply_participant_calendar(
     problem: &SchedulingProblem,
     start: VariableId,
     participant: ParticipantId,
+    duration: i64,
 ) {
     if let Some(found) = problem
         .participants
         .iter()
         .find(|candidate| candidate.id() == participant)
     {
-        let ranges = found.unavailable_ranges();
+        let ranges = forbidden_start_ranges(
+            found.unavailable_ranges(),
+            found.blocked_windows(),
+            duration,
+        );
         if !ranges.is_empty() {
-            builder.add_calendar(start, ranges);
+            builder.add_calendar(start, &ranges);
         }
     }
 }
@@ -1094,13 +1121,18 @@ fn apply_optional_resource_calendar(
     start: VariableId,
     resource: ResourceId,
     presence: VariableId,
+    duration: i64,
 ) {
     if let Some(found) = problem
         .resources
         .iter()
         .find(|candidate| candidate.id() == resource)
     {
-        let ranges = found.unavailable_ranges();
+        let ranges = forbidden_start_ranges(
+            found.unavailable_ranges(),
+            found.blocked_windows(),
+            duration,
+        );
         if !ranges.is_empty() {
             let forbidden = ranges
                 .iter()
@@ -1118,13 +1150,18 @@ fn apply_optional_participant_calendar(
     start: VariableId,
     participant: ParticipantId,
     presence: VariableId,
+    duration: i64,
 ) {
     if let Some(found) = problem
         .participants
         .iter()
         .find(|candidate| candidate.id() == participant)
     {
-        let ranges = found.unavailable_ranges();
+        let ranges = forbidden_start_ranges(
+            found.unavailable_ranges(),
+            found.blocked_windows(),
+            duration,
+        );
         if !ranges.is_empty() {
             let forbidden = ranges
                 .iter()
@@ -1132,6 +1169,24 @@ fn apply_optional_participant_calendar(
             builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence);
         }
     }
+}
+
+/// The start slots an entity's unavailability forbids, as inclusive ranges: the ranges themselves
+/// (start semantics) plus every start that would *occupy* a blocked window of this `duration`.
+fn forbidden_start_ranges(
+    unavailable: &[(i64, i64)],
+    blocked: &[TimeWindow],
+    duration: i64,
+) -> Vec<(i64, i64)> {
+    let mut ranges = unavailable.to_vec();
+    ranges.extend(
+        blocked
+            .iter()
+            .map(|window| window.blocked_starts(duration))
+            .filter(|starts| !starts.is_empty())
+            .map(|starts| (*starts.start(), *starts.end())),
+    );
+    ranges
 }
 
 fn expand_group_participants(
