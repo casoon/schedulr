@@ -13,13 +13,14 @@ pub use explain::{
 };
 pub use model::{
     AbortReason, AcademicPeriod, Activity, ActivityId, ActivityRelation,
-    ActivityRelationConstraint, Assignment, BreakTemplate, CompileError, Conflict,
+    ActivityRelationConstraint, Assignment, BreakTemplate, BucketWindow, CompileError, Conflict,
     ConflictSeverity, DEFAULT_CAPACITY_DIMENSION, DayTemplate, EntityRef, GroupMember,
-    GroupMembership, Participant, ParticipantGroup, ParticipantGroupId, ParticipantId,
-    ParticipantPool, ParticipantPoolId, ParticipantRequirement, ProposedActivity, Resource,
-    ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement, ScheduleTemplate,
-    SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SlotTemplate,
-    Solution, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
+    GroupMembership, MaximumDailyLoad, MinimumBreak, Participant, ParticipantGroup,
+    ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
+    ProposedActivity, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,
+    ScheduleTemplate, SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule,
+    ScoreRuleKind, SlotTemplate, Solution, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
+    bucket_windows,
 };
 pub use repair::RepairOptions;
 pub use state::SchedulingState;

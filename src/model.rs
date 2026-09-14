@@ -806,6 +806,129 @@ impl ActivityRelationConstraint {
     }
 }
 
+/// Hard cap on the total occupied duration one entity may accumulate inside a single period
+/// bucket (e.g. one day): "sum of occupied duration per resource/participant and period bucket <=
+/// limit".
+///
+/// Buckets come from the [`ScheduleTemplate`] — one bucket per [`DayTemplate`], repeated over the
+/// cycle; without a schedule template the whole modeled horizon counts as a single bucket. The
+/// limit is applied separately to each entity's assignments: a resource counts the activities that
+/// require it (weighted by the requirement's units), a participant counts the activities it
+/// attends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaximumDailyLoad {
+    /// Resource or participant the limit applies to.
+    pub entity: EntityRef,
+    /// Maximum occupied duration per bucket.
+    pub limit: u64,
+}
+
+impl MaximumDailyLoad {
+    pub const fn new(entity: EntityRef, limit: u64) -> Self {
+        Self { entity, limit }
+    }
+
+    pub const fn for_resource(resource: ResourceId, limit: u64) -> Self {
+        Self::new(EntityRef::Resource(resource), limit)
+    }
+
+    pub const fn for_participant(participant: ParticipantId, limit: u64) -> Self {
+        Self::new(EntityRef::Participant(participant), limit)
+    }
+}
+
+/// One bucket a load rule is checked against: a half-open window plus the bucket it belongs to
+/// (plan 25, C1). The bucket index repeats across cycles — the same day of the cycle is the same
+/// bucket in every cycle, which is what makes "per day" mean "per day of the cycle".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketWindow {
+    pub bucket: usize,
+    pub window: TimeWindow,
+}
+
+/// The buckets load rules are checked against, derived from the schedule template: each day
+/// becomes a bucket, repeated once per cycle; without a valid template the whole horizon is one
+/// bucket (plan 25, C1).
+///
+/// Public on purpose: a caller reasoning about teaching blocks ("is this course taught as a double
+/// period plus singles?") must use the **same** bucket notion as the solver. A second, parallel
+/// notion of "day" is exactly the divergence this avoids.
+pub fn bucket_windows(
+    template: Option<&ScheduleTemplate>,
+    min_value: i64,
+    max_value: i64,
+) -> Vec<BucketWindow> {
+    if min_value >= max_value {
+        return Vec::new();
+    }
+    let Some(template) = template.filter(|template| template.cycle_length > 0) else {
+        return vec![BucketWindow {
+            bucket: 0,
+            window: TimeWindow::new(min_value, max_value),
+        }];
+    };
+    let mut offsets: Vec<i64> = template.days.iter().map(|day| day.day_offset).collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let Some(&first_offset) = offsets.first() else {
+        return vec![BucketWindow {
+            bucket: 0,
+            window: TimeWindow::new(min_value, max_value),
+        }];
+    };
+    let cycle = template.cycle_length;
+    let mut ranges = Vec::new();
+    for k in (min_value.div_euclid(cycle) - 1)..=(max_value.div_euclid(cycle) + 1) {
+        for (bucket, &offset) in offsets.iter().enumerate() {
+            let end_offset = offsets
+                .get(bucket + 1)
+                .copied()
+                .unwrap_or(first_offset + cycle);
+            let base = k.saturating_mul(cycle);
+            ranges.push(BucketWindow {
+                bucket,
+                window: TimeWindow::new(
+                    base.saturating_add(offset),
+                    base.saturating_add(end_offset),
+                ),
+            });
+        }
+    }
+    ranges
+}
+
+/// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
+/// break between two of their activities.
+///
+/// Kept deliberately separate from a fixed [`BreakTemplate`] (which blocks a calendar window): this
+/// constrains the relative placement of an entity's assignments. The distance is measured between
+/// the assignments' start values, so to require a real free gap the caller includes the earlier
+/// activity's duration in `min_distance`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinimumBreak {
+    /// Resource or participant the distance applies to.
+    pub entity: EntityRef,
+    /// Minimum distance between any two of the entity's assignment start values.
+    pub min_distance: i64,
+}
+
+impl MinimumBreak {
+    pub const fn new(entity: EntityRef, min_distance: i64) -> Self {
+        Self {
+            entity,
+            min_distance,
+        }
+    }
+
+    pub const fn for_resource(resource: ResourceId, min_distance: i64) -> Self {
+        Self::new(EntityRef::Resource(resource), min_distance)
+    }
+
+    pub const fn for_participant(participant: ParticipantId, min_distance: i64) -> Self {
+        Self::new(EntityRef::Participant(participant), min_distance)
+    }
+}
+
 impl ProposedActivity {
     pub fn new(name: impl Into<String>, window: TimeWindow) -> Self {
         Self {
@@ -871,6 +994,8 @@ pub struct SchedulingProblem {
     pub schedule_template: Option<ScheduleTemplate>,
     pub score_rules: Vec<ScoreRule>,
     pub relations: Vec<ActivityRelationConstraint>,
+    pub maximum_daily_loads: Vec<MaximumDailyLoad>,
+    pub minimum_breaks: Vec<MinimumBreak>,
 }
 
 impl SchedulingProblem {
@@ -891,6 +1016,8 @@ impl SchedulingProblem {
             schedule_template: None,
             score_rules: Vec::new(),
             relations: Vec::new(),
+            maximum_daily_loads: Vec::new(),
+            minimum_breaks: Vec::new(),
         }
     }
 
@@ -931,6 +1058,18 @@ impl SchedulingProblem {
 
     pub fn with_relation(mut self, relation: ActivityRelationConstraint) -> Self {
         self.relations.push(relation);
+        self
+    }
+
+    /// Adds a per-entity cap on the occupied duration within each period bucket.
+    pub fn with_maximum_daily_load(mut self, load: MaximumDailyLoad) -> Self {
+        self.maximum_daily_loads.push(load);
+        self
+    }
+
+    /// Adds a per-entity minimum distance between any two of its assignments.
+    pub fn with_minimum_break(mut self, minimum_break: MinimumBreak) -> Self {
+        self.minimum_breaks.push(minimum_break);
         self
     }
 }

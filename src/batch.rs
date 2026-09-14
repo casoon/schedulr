@@ -3,13 +3,14 @@ use crate::model::{
     ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
     ParticipantRequirement, Resource, ResourceId, ResourcePool, ResourceRequirement,
     SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, Solution,
-    SolveResult, SolveStatistics, SolveStatus, TimeWindow,
+    SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_windows,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use unifier::constraint::{
-    Assignment as UnifierAssignment, Constraint, Explanation, PropagationResult,
+    Assignment as UnifierAssignment, BucketRange, BucketedTask, Constraint, Explanation,
+    PropagationResult,
 };
 use unifier::model::domain::{Domain, TrailedDomains};
 use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
@@ -427,6 +428,58 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         selected_capacity_constraints.push((constraint, selected_constraint));
     }
 
+    // MaximumDailyLoad: cap the occupied duration each entity accumulates per period bucket.
+    if !problem.maximum_daily_loads.is_empty() {
+        let ranges = load_bucket_ranges(problem, &expanded_activities);
+        for rule in &problem.maximum_daily_loads {
+            let tasks = load_tasks_for(
+                problem,
+                &expanded_activities,
+                &variables,
+                &fixed_resources,
+                &fixed_participants,
+                &selected_resources,
+                &selected_participants,
+                rule.entity,
+            );
+            if tasks.is_empty() {
+                continue;
+            }
+            builder.add_maximum_bucket_load(
+                tasks,
+                ranges.clone(),
+                i64::try_from(rule.limit).unwrap_or(i64::MAX),
+            );
+        }
+    }
+
+    // MinimumBreak: minimum distance between any two of an entity's deterministically assigned
+    // activities. Multi-candidate pools are not paired (a distance may only apply when the entity
+    // is selected for *both* activities, a condition the available primitives cannot express);
+    // requirements that force a single candidate do take part.
+    for rule in &problem.minimum_breaks {
+        if rule.min_distance <= 0 {
+            continue;
+        }
+        let activity_ids = entity_activity_ids(
+            &expanded_activities,
+            &fixed_resources,
+            &fixed_participants,
+            &selected_resources,
+            &selected_participants,
+            rule.entity,
+        );
+        for (index, &first) in activity_ids.iter().enumerate() {
+            for &second in &activity_ids[index + 1..] {
+                builder.add_minimum_distance(
+                    variables[&first].0,
+                    variables[&second].0,
+                    rule.min_distance,
+                );
+            }
+        }
+    }
+
     for rule in &problem.score_rules {
         let Some(&(start, _)) = variables.get(&rule.activity) else {
             continue;
@@ -838,6 +891,38 @@ fn validate_input(problem: &SchedulingProblem) -> Vec<String> {
                 "activity relation cannot relate activity {} to itself",
                 relation.first
             ));
+        }
+    }
+    for load in &problem.maximum_daily_loads {
+        match load.entity {
+            EntityRef::Resource(resource) if !resource_ids.contains_key(&resource) => errors.push(
+                format!("maximum daily load references unknown resource {resource}"),
+            ),
+            EntityRef::Participant(participant) if !participant_ids.contains(&participant) => {
+                errors.push(format!(
+                    "maximum daily load references unknown participant {participant}"
+                ));
+            }
+            EntityRef::Activity(activity) => errors.push(format!(
+                "maximum daily load must reference a resource or participant, not activity {activity}"
+            )),
+            _ => {}
+        }
+    }
+    for minimum_break in &problem.minimum_breaks {
+        match minimum_break.entity {
+            EntityRef::Resource(resource) if !resource_ids.contains_key(&resource) => errors.push(
+                format!("minimum break references unknown resource {resource}"),
+            ),
+            EntityRef::Participant(participant) if !participant_ids.contains(&participant) => {
+                errors.push(format!(
+                    "minimum break references unknown participant {participant}"
+                ));
+            }
+            EntityRef::Activity(activity) => errors.push(format!(
+                "minimum break must reference a resource or participant, not activity {activity}"
+            )),
+            _ => {}
         }
     }
     errors
@@ -1281,6 +1366,144 @@ fn abort_reason(reason: UnifierAbortReason) -> AbortReason {
 
 fn duration_as_i64(duration: u64) -> i64 {
     i64::try_from(duration).unwrap_or(i64::MAX)
+}
+
+/// Collects the load tasks an entity accumulates, mirroring how the capacity constraints gather
+/// their tasks: fixed requirements unconditionally, flexible (alternative) candidates gated by
+/// their presence variable. Resource tasks weigh their requirement's units; participant tasks
+/// weigh 1.
+#[allow(clippy::too_many_arguments)]
+fn load_tasks_for(
+    problem: &SchedulingProblem,
+    activities: &[Activity],
+    variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
+    fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
+    fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+    entity: EntityRef,
+) -> Vec<BucketedTask> {
+    let mut tasks = Vec::new();
+    for activity in activities {
+        let Some(&(start, _)) = variables.get(&activity.id()) else {
+            continue;
+        };
+        let duration = duration_as_i64(activity.duration());
+        match entity {
+            EntityRef::Resource(resource) => {
+                let units = i64::from(resource_units(problem, activity, resource));
+                if fixed_resources
+                    .get(&activity.id())
+                    .is_some_and(|resources| resources.contains(&resource))
+                {
+                    tasks.push(BucketedTask::new(start, duration, units));
+                } else if let Some(presence) =
+                    selected_resources
+                        .get(&activity.id())
+                        .and_then(|candidates| {
+                            candidates
+                                .iter()
+                                .find(|(candidate, _)| *candidate == resource)
+                                .map(|(_, presence)| *presence)
+                        })
+                {
+                    tasks.push(BucketedTask::new(start, duration, units).with_presence(presence));
+                }
+            }
+            EntityRef::Participant(participant) => {
+                let fixed = activity.participants().contains(&participant)
+                    || fixed_participants
+                        .get(&activity.id())
+                        .is_some_and(|participants| participants.contains(&participant));
+                if fixed {
+                    tasks.push(BucketedTask::new(start, duration, 1));
+                } else if let Some(presence) =
+                    selected_participants
+                        .get(&activity.id())
+                        .and_then(|candidates| {
+                            candidates
+                                .iter()
+                                .find(|(candidate, _)| *candidate == participant)
+                                .map(|(_, presence)| *presence)
+                        })
+                {
+                    tasks.push(BucketedTask::new(start, duration, 1).with_presence(presence));
+                }
+            }
+            EntityRef::Activity(_) => {}
+        }
+    }
+    tasks
+}
+
+/// Returns the units `activity` demands of `resource` (1 if no matching requirement is found).
+fn resource_units(problem: &SchedulingProblem, activity: &Activity, resource: ResourceId) -> u32 {
+    activity
+        .requirements()
+        .iter()
+        .find(|requirement| resolve_requirement(problem, requirement).contains(&resource))
+        .map_or(1, ResourceRequirement::units)
+}
+
+/// Returns the activities for which `entity` is deterministically assigned: either fixed outright
+/// (fixed resource/participant), or bound through a requirement whose candidate set the engine
+/// resolved to exactly that one entity — `exactly_one` then forces its presence, so the assignment
+/// holds for every solution. Multi-candidate pools are deliberately excluded: their distance would
+/// have to be conditional on the entity being selected for *both* activities, which
+/// [`unifier::MinimumDistance`] cannot express.
+fn entity_activity_ids(
+    activities: &[Activity],
+    fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
+    fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+    entity: EntityRef,
+) -> Vec<ActivityId> {
+    activities
+        .iter()
+        .filter(|activity| match entity {
+            EntityRef::Resource(resource) => {
+                fixed_resources
+                    .get(&activity.id())
+                    .is_some_and(|resources| resources.contains(&resource))
+                    || guaranteed_candidate(selected_resources.get(&activity.id()), resource)
+            }
+            EntityRef::Participant(participant) => {
+                activity.participants().contains(&participant)
+                    || fixed_participants
+                        .get(&activity.id())
+                        .is_some_and(|participants| participants.contains(&participant))
+                    || guaranteed_candidate(selected_participants.get(&activity.id()), participant)
+            }
+            EntityRef::Activity(_) => false,
+        })
+        .map(Activity::id)
+        .collect()
+}
+
+/// True when `candidates` is a single-entry selection list for `entity`: the requirement's
+/// exactly-one over that sole candidate forces the entity to be selected.
+fn guaranteed_candidate<T: Copy + PartialEq>(
+    candidates: Option<&Vec<(T, VariableId)>>,
+    entity: T,
+) -> bool {
+    candidates.is_some_and(|candidates| candidates.len() == 1 && candidates[0].0 == entity)
+}
+
+/// Builds the half-open value ranges one load constraint is checked against. Delegates to
+/// [`bucket_windows`] so the solver and every caller reasoning about blocks share one notion of
+/// a bucket (plan 25, C1).
+fn load_bucket_ranges(problem: &SchedulingProblem, activities: &[Activity]) -> Vec<BucketRange> {
+    let (Some(min_value), Some(max_value)) = (
+        activities.iter().map(|a| a.allowed_window().start).min(),
+        activities.iter().map(|a| a.allowed_window().end).max(),
+    ) else {
+        return Vec::new();
+    };
+    bucket_windows(problem.schedule_template.as_ref(), min_value, max_value)
+        .into_iter()
+        .map(|entry| BucketRange::new(entry.window.start, entry.window.end, entry.bucket))
+        .collect()
 }
 
 fn duration_of(activities: &[Activity], id: ActivityId) -> u64 {
