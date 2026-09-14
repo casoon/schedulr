@@ -18,7 +18,8 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 - schedulr adds the scheduling vocabulary on top: activities, resources, participants, calendars,
   preferences, conflicts.
 
-schedulr depends on `unifier` 0.3.1 and nothing else.
+schedulr depends on `unifier` and nothing else: the 0.8.0 release on unifier 0.3.1, the master
+branch on unifier 0.3.2.
 
 ## What schedulr compiles into
 

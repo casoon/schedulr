@@ -806,6 +806,281 @@ impl ActivityRelationConstraint {
     }
 }
 
+/// Hard cap on the total occupied duration one entity may accumulate inside a single period
+/// bucket (e.g. one day): "sum of occupied duration per resource/participant and period bucket <=
+/// limit".
+///
+/// Buckets come from the [`ScheduleTemplate`] — one bucket per [`DayTemplate`], repeated over the
+/// cycle; without a schedule template the whole modeled horizon counts as a single bucket. The
+/// limit is applied separately to each entity's assignments: a resource counts the activities that
+/// require it (weighted by the requirement's units), a participant counts the activities it
+/// attends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaximumDailyLoad {
+    /// Resource or participant the limit applies to.
+    pub entity: EntityRef,
+    /// Maximum occupied duration per bucket.
+    pub limit: u64,
+}
+
+impl MaximumDailyLoad {
+    pub const fn new(entity: EntityRef, limit: u64) -> Self {
+        Self { entity, limit }
+    }
+
+    pub const fn for_resource(resource: ResourceId, limit: u64) -> Self {
+        Self::new(EntityRef::Resource(resource), limit)
+    }
+
+    pub const fn for_participant(participant: ParticipantId, limit: u64) -> Self {
+        Self::new(EntityRef::Participant(participant), limit)
+    }
+}
+
+/// One bucket a load rule is checked against: a half-open window plus the bucket it belongs to
+/// (plan 25, C1). The bucket index repeats across cycles — the same day of the cycle is the same
+/// bucket in every cycle, which is what makes "per day" mean "per day of the cycle".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketWindow {
+    pub bucket: usize,
+    pub window: TimeWindow,
+}
+
+/// The buckets load rules are checked against, derived from the schedule template: each day
+/// becomes a bucket, repeated once per cycle; without a valid template the whole horizon is one
+/// bucket (plan 25, C1).
+///
+/// Public on purpose: a caller reasoning about teaching blocks ("is this course taught as a double
+/// period plus singles?") must use the **same** bucket notion as the solver. A second, parallel
+/// notion of "day" is exactly the divergence this avoids.
+pub fn bucket_windows(
+    template: Option<&ScheduleTemplate>,
+    min_value: i64,
+    max_value: i64,
+) -> Vec<BucketWindow> {
+    if min_value >= max_value {
+        return Vec::new();
+    }
+    let Some(template) = template.filter(|template| template.cycle_length > 0) else {
+        return vec![BucketWindow {
+            bucket: 0,
+            window: TimeWindow::new(min_value, max_value),
+        }];
+    };
+    let mut offsets: Vec<i64> = template.days.iter().map(|day| day.day_offset).collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let Some(&first_offset) = offsets.first() else {
+        return vec![BucketWindow {
+            bucket: 0,
+            window: TimeWindow::new(min_value, max_value),
+        }];
+    };
+    let cycle = template.cycle_length;
+    let mut ranges = Vec::new();
+    for k in (min_value.div_euclid(cycle) - 1)..=(max_value.div_euclid(cycle) + 1) {
+        for (bucket, &offset) in offsets.iter().enumerate() {
+            let end_offset = offsets
+                .get(bucket + 1)
+                .copied()
+                .unwrap_or(first_offset + cycle);
+            let base = k.saturating_mul(cycle);
+            ranges.push(BucketWindow {
+                bucket,
+                window: TimeWindow::new(
+                    base.saturating_add(offset),
+                    base.saturating_add(end_offset),
+                ),
+            });
+        }
+    }
+    ranges
+}
+
+/// Allowed shapes of a group of activities' teaching blocks, expressed over the schedule's own
+/// buckets (plan 25, C1).
+///
+/// `allowed` holds multisets of **consecutive block durations**, order irrelevant: `[2, 1, 1]`
+/// means "one double block and two single blocks", regardless of which buckets they land in.
+/// The buckets themselves come from the [`ScheduleTemplate`] (see `load_bucket_ranges`), so
+/// schedulr never learns what a "day" or "week" is — the caller supplies the context.
+/// An empty `allowed` list means "no pattern chosen", and the rule simply does not apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketLoadPattern {
+    /// The activities this pattern constrains, e.g. all occurrences of one course.
+    pub activities: Vec<ActivityId>,
+    /// Allowed block multisets, e.g. `[[2, 1, 1], [1, 1, 1, 1]]`.
+    pub allowed: Vec<Vec<u64>>,
+}
+
+impl BucketLoadPattern {
+    pub fn new(activities: Vec<ActivityId>, allowed: Vec<Vec<u64>>) -> Self {
+        Self {
+            activities,
+            allowed,
+        }
+    }
+
+    /// Whether the rule applies at all — a pattern without activities or without an allowed
+    /// shape must never turn into a violation.
+    pub fn is_active(&self) -> bool {
+        !self.activities.is_empty() && !self.allowed.is_empty()
+    }
+}
+
+/// The consecutive block durations this group occupies **per bucket**, in bucket order
+/// (plan 25, C1). Two touching or overlapping assignments form one block, which is what makes
+/// "a double period" observable at all; every block is reported as an absolute end, so callers
+/// can compare block lengths without re-deriving the arithmetic.
+pub fn bucket_load_blocks(
+    assignments: &[(ActivityId, TimeWindow)],
+    buckets: &[TimeWindow],
+) -> Vec<Vec<i64>> {
+    let mut blocks_per_bucket = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        let mut segments: Vec<(i64, i64)> = assignments
+            .iter()
+            .filter_map(|(_, window)| {
+                let start = window.start.max(bucket.start);
+                let end = window.end.min(bucket.end);
+                (start < end).then_some((start, end))
+            })
+            .collect();
+        segments.sort_unstable();
+
+        let mut blocks: Vec<(i64, i64)> = Vec::new();
+        for (start, end) in segments {
+            match blocks.last_mut() {
+                // Touching counts as one block: a double period occupies two adjacent slots.
+                Some(block) if start <= block.1 => block.1 = block.1.max(end),
+                _ => blocks.push((start, end)),
+            }
+        }
+        blocks_per_bucket.push(blocks.into_iter().map(|(start, end)| end - start).collect());
+    }
+    blocks_per_bucket
+}
+
+/// The group's block durations across all buckets, largest first — the comparable form of a
+/// teaching pattern. `[2, 1, 1]` and `[1, 2, 1]` produce the same result (plan 25, C1).
+pub fn bucket_load_pattern(
+    assignments: &[(ActivityId, TimeWindow)],
+    buckets: &[TimeWindow],
+) -> Vec<i64> {
+    let mut durations: Vec<i64> = bucket_load_blocks(assignments, buckets)
+        .into_iter()
+        .flatten()
+        .collect();
+    durations.sort_unstable_by(|left, right| right.cmp(left));
+    durations
+}
+
+/// Whether the group's teaching blocks match one of the allowed patterns (order irrelevant,
+/// plan 25, C1). A pattern that is not active is never violated.
+pub fn matches_bucket_load_pattern(
+    pattern: &BucketLoadPattern,
+    assignments: &[(ActivityId, TimeWindow)],
+    buckets: &[TimeWindow],
+) -> bool {
+    if !pattern.is_active() {
+        return true;
+    }
+    let observed = bucket_load_pattern(assignments, buckets);
+    pattern.allowed.iter().any(|allowed| {
+        let mut allowed: Vec<i64> = allowed.iter().map(|block| *block as i64).collect();
+        allowed.sort_unstable_by(|left, right| right.cmp(left));
+        allowed == observed
+    })
+}
+
+/// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
+/// break between two of their activities.
+///
+/// Kept deliberately separate from a fixed [`BreakTemplate`] (which blocks a calendar window): this
+/// constrains the relative placement of an entity's assignments. The distance is measured between
+/// the assignments' start values, so to require a real free gap the caller includes the earlier
+/// activity's duration in `min_distance`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinimumBreak {
+    /// Resource or participant the distance applies to.
+    pub entity: EntityRef,
+    /// Minimum distance between any two of the entity's assignment start values.
+    pub min_distance: i64,
+}
+
+impl MinimumBreak {
+    pub const fn new(entity: EntityRef, min_distance: i64) -> Self {
+        Self {
+            entity,
+            min_distance,
+        }
+    }
+
+    pub const fn for_resource(resource: ResourceId, min_distance: i64) -> Self {
+        Self::new(EntityRef::Resource(resource), min_distance)
+    }
+
+    pub const fn for_participant(participant: ParticipantId, min_distance: i64) -> Self {
+        Self::new(EntityRef::Participant(participant), min_distance)
+    }
+}
+
+/// A problem-level soft preference, contrasted with the activity-scoped [`ScoreRule`].
+///
+/// Every goal contributes to its [`ScoreLevel`] tier with its `weight`, and its contribution is
+/// reported in [`Solution::score_components`] under `category` (with `activity == None`, since the
+/// goal is not owned by a single activity). This lets a caller display exactly the goals it
+/// configured and how much each one currently costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftGoalKind {
+    /// Minimise free time (unoccupied spans) between one participant's assignments inside each
+    /// period bucket.
+    MinimizeParticipantIdle,
+    /// Minimise free time between the aggregate occupancy of one participant group inside each
+    /// period bucket. Occupancy is the union of the assignments of all members of the group.
+    MinimizeGroupIdle,
+    /// Prefer a stable resource assignment: occurrences that share an activity name should use as
+    /// few distinct resources as possible.
+    RoomStability,
+    /// Spread occurrences that share an activity name across the period buckets instead of
+    /// clustering several of them in the same bucket.
+    SpreadActivityOverDays,
+}
+
+/// One problem-level soft goal.
+///
+/// Unlike [`ScoreRule`] this is not tied to a single activity: it applies to the whole
+/// [`SchedulingProblem`] and is added through [`SchedulingProblem::with_soft_goal`]. The penalty a
+/// goal accumulates always reduces the soft score, so a larger `weight` makes the goal dominate
+/// other goals at the same [`ScoreLevel`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    /// Lexicographic level the contribution is scored at.
+    pub level: ScoreLevel,
+    /// Multiplier applied to the goal's accumulated penalty (non-negative by convention).
+    pub weight: i64,
+    /// Which global preference this goal expresses.
+    pub kind: SoftGoalKind,
+}
+
+impl SoftGoal {
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        weight: i64,
+        kind: SoftGoalKind,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            weight,
+            kind,
+        }
+    }
+}
+
 impl ProposedActivity {
     pub fn new(name: impl Into<String>, window: TimeWindow) -> Self {
         Self {
@@ -871,6 +1146,11 @@ pub struct SchedulingProblem {
     pub schedule_template: Option<ScheduleTemplate>,
     pub score_rules: Vec<ScoreRule>,
     pub relations: Vec<ActivityRelationConstraint>,
+    pub maximum_daily_loads: Vec<MaximumDailyLoad>,
+    pub minimum_breaks: Vec<MinimumBreak>,
+    /// Allowed block shapes for groups of activities (plan 25, C1).
+    pub bucket_load_patterns: Vec<BucketLoadPattern>,
+    pub soft_goals: Vec<SoftGoal>,
 }
 
 impl SchedulingProblem {
@@ -891,6 +1171,10 @@ impl SchedulingProblem {
             schedule_template: None,
             score_rules: Vec::new(),
             relations: Vec::new(),
+            maximum_daily_loads: Vec::new(),
+            minimum_breaks: Vec::new(),
+            bucket_load_patterns: Vec::new(),
+            soft_goals: Vec::new(),
         }
     }
 
@@ -924,6 +1208,18 @@ impl SchedulingProblem {
         self
     }
 
+    /// Attaches the schedule template **without** turning on the periodic calendar, which
+    /// [`Self::with_calendar`] does together with it.
+    ///
+    /// The template supplies the bucket structure every load rule is measured against
+    /// (plan 25, C1) — without it the whole horizon is a single bucket. Restricting starts to the
+    /// template's slots is a separate decision and stays with the caller that also has an
+    /// academic period.
+    pub fn with_schedule_template(mut self, schedule_template: ScheduleTemplate) -> Self {
+        self.schedule_template = Some(schedule_template);
+        self
+    }
+
     pub fn with_score_rule(mut self, rule: ScoreRule) -> Self {
         self.score_rules.push(rule);
         self
@@ -931,6 +1227,34 @@ impl SchedulingProblem {
 
     pub fn with_relation(mut self, relation: ActivityRelationConstraint) -> Self {
         self.relations.push(relation);
+        self
+    }
+
+    /// Adds a per-entity cap on the occupied duration within each period bucket.
+    pub fn with_maximum_daily_load(mut self, load: MaximumDailyLoad) -> Self {
+        self.maximum_daily_loads.push(load);
+        self
+    }
+
+    /// Adds a per-entity minimum distance between any two of its assignments.
+    pub fn with_minimum_break(mut self, minimum_break: MinimumBreak) -> Self {
+        self.minimum_breaks.push(minimum_break);
+        self
+    }
+
+    /// Adds an allowed teaching-shape rule for a group of activities (plan 25, C1).
+    ///
+    /// The rule is compiled as a hard constraint: the consecutive blocks the group occupies must
+    /// form one of the pattern's allowed multisets. An inactive pattern (no activities or no
+    /// allowed shape) is ignored rather than rejected — see [`BucketLoadPattern::is_active`].
+    pub fn with_bucket_load_pattern(mut self, pattern: BucketLoadPattern) -> Self {
+        self.bucket_load_patterns.push(pattern);
+        self
+    }
+
+    /// Adds a problem-level soft goal scored at its own level and reported under its category.
+    pub fn with_soft_goal(mut self, goal: SoftGoal) -> Self {
+        self.soft_goals.push(goal);
         self
     }
 }
@@ -962,7 +1286,23 @@ impl std::error::Error for CompileError {}
 pub enum SolveStatus {
     Feasible,
     Infeasible,
-    Aborted,
+    Aborted(AbortReason),
+}
+
+/// Why a solve run stopped without reaching a conclusive result — mirrors
+/// `unifier::solver::AbortReason`, kept as a distinct type here so callers never need to
+/// depend on `unifier` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbortReason {
+    /// The caller's [`crate::CancellationToken`] was cancelled.
+    Cancelled,
+    /// The configured time limit elapsed.
+    Timeout,
+    /// The configured search node limit was reached.
+    NodeLimit,
+    /// A local-search-style solver reached a local optimum with no improving move
+    /// available. This does not prove infeasibility or optimality.
+    LocalOptimum,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
