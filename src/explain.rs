@@ -1,9 +1,10 @@
 use crate::{
     ActivityId, Assignment, CompiledProblem, Conflict, ConflictSeverity, EntityRef, ResourceId,
-    Score, Solution, TimeWindow,
+    Score, ScoreComponent, Solution, TimeWindow,
 };
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use unifier::VariableId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bottleneck {
@@ -27,6 +28,41 @@ pub struct MoveEvaluation {
     pub score_delta: Score,
     pub warnings: Vec<Conflict>,
     pub explanations: Vec<String>,
+    /// The score components of the *candidate* plan, so callers can explain a move per
+    /// stable category instead of reducing it to one averaged number (plan 25, B4).
+    pub score_components: Vec<ScoreComponent>,
+}
+
+/// One requested change in an atomic batch: a move or a swap. Every request in a batch is
+/// evaluated against the *same* starting solution, so a batch is all-or-nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeRequest {
+    /// Moves `activity` to `window`; the duration must stay unchanged.
+    Move {
+        activity: ActivityId,
+        window: TimeWindow,
+    },
+    /// Exchanges the time windows of two activities — the only atomic way to express it.
+    Swap {
+        first: ActivityId,
+        second: ActivityId,
+    },
+}
+
+/// The result of evaluating a whole batch of [`ChangeRequest`]s at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeEvaluation {
+    pub is_feasible: bool,
+    pub hard_violations: Vec<Conflict>,
+    pub warnings: Vec<Conflict>,
+    pub score_delta: Score,
+    pub score_components: Vec<ScoreComponent>,
+    pub explanations: Vec<String>,
+    /// The plan the batch would produce — the only place a change is materialised, so
+    /// callers never have to re-implement move/swap semantics themselves. It is built even
+    /// for a refused batch (the UI wants to show what was attempted); it must therefore
+    /// **never** be persisted without checking `is_feasible` first.
+    pub candidate: Solution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +247,116 @@ impl CompiledProblem {
                 .into_iter()
                 .map(|conflict| conflict.message)
                 .collect(),
+            score_components: self.internal.score_components(&committed),
         }
+    }
+
+    /// Evaluates several changes **atomically** against one starting solution (plan 25,
+    /// B4). Move and swap can be mixed in one batch; everything is applied to a private
+    /// copy of the assignment, so a half-applied state can never be observed and the
+    /// starting solution is never mutated. The first invalid request aborts the whole
+    /// batch with a blocking `ActivityDomain` violation.
+    pub fn evaluate_changes(
+        &self,
+        solution: &Solution,
+        changes: &[ChangeRequest],
+    ) -> ChangeEvaluation {
+        let mut committed = self.internal.assignment_map(solution);
+        let windows = solution
+            .assignments
+            .iter()
+            .map(|assignment| (assignment.activity, assignment.window))
+            .collect::<BTreeMap<_, _>>();
+        let mut updates: Vec<(VariableId, i64)> = Vec::new();
+        for change in changes {
+            let (activity, window) = match change {
+                ChangeRequest::Move { activity, window } => (*activity, *window),
+                ChangeRequest::Swap { first, second } => {
+                    let (Some(first_window), Some(second_window)) =
+                        (windows.get(first), windows.get(second))
+                    else {
+                        return invalid_change(
+                            *first,
+                            "swap refers to an activity that is not part of the solution",
+                            solution,
+                        );
+                    };
+                    if first_window.duration() != second_window.duration() {
+                        return invalid_change(
+                            *first,
+                            "swap requires two activities of equal duration",
+                            solution,
+                        );
+                    }
+                    updates.extend(self.window_updates(*first, *second_window));
+                    updates.extend(self.window_updates(*second, *first_window));
+                    continue;
+                }
+            };
+            let Some(model) = self
+                .problem
+                .activities
+                .iter()
+                .find(|candidate| candidate.id() == activity)
+            else {
+                return invalid_change(activity, "unknown activity", solution);
+            };
+            if window.duration() != Some(model.duration())
+                || window.start < model.allowed_window().start
+                || window.end > model.allowed_window().end
+            {
+                return invalid_change(
+                    activity,
+                    "proposed window is outside the activity domain",
+                    solution,
+                );
+            }
+            updates.extend(self.window_updates(activity, window));
+        }
+        let old_score = self.internal.score_for(&committed);
+        let conflicts = self.internal.check_incremental(&committed, &updates);
+        for (variable, value) in updates {
+            committed.insert(variable, value);
+        }
+        let new_score = self.internal.score_for(&committed);
+        let score_components = self.internal.score_components(&committed);
+        let candidate = Solution {
+            assignments: solution
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let (start, end) = self.internal.variables_for(assignment.activity);
+                    Assignment {
+                        activity: assignment.activity,
+                        window: TimeWindow::new(
+                            committed
+                                .get(&start)
+                                .copied()
+                                .unwrap_or(assignment.window.start),
+                            committed
+                                .get(&end)
+                                .copied()
+                                .unwrap_or(assignment.window.end),
+                        ),
+                        resources: assignment.resources.clone(),
+                        participants: assignment.participants.clone(),
+                    }
+                })
+                .collect(),
+            score: new_score,
+            score_components: score_components.clone(),
+        };
+        ChangeEvaluation::from_conflicts(
+            conflicts,
+            subtract_score(new_score, old_score),
+            score_components,
+            candidate,
+        )
+    }
+
+    fn window_updates(&self, activity: ActivityId, window: TimeWindow) -> [(VariableId, i64); 2] {
+        let (start, end) = self.internal.variables_for(activity);
+        [(start, window.start), (end, window.end)]
     }
 
     pub fn suggest(&self, solution: &Solution, proposed: TimeWindow) -> Vec<Suggestion> {
@@ -247,6 +392,59 @@ fn invalid_move(activity: ActivityId, message: &str) -> MoveEvaluation {
         score_delta: Score::default(),
         warnings: Vec::new(),
         explanations: vec![conflict.message],
+        score_components: Vec::new(),
+    }
+}
+
+fn invalid_change(activity: ActivityId, message: &str, solution: &Solution) -> ChangeEvaluation {
+    let conflict = Conflict {
+        severity: ConflictSeverity::Blocking,
+        constraint_name: "ActivityDomain".to_string(),
+        involved: vec![activity],
+        entity: Some(EntityRef::Activity(activity)),
+        message: message.to_string(),
+    };
+    ChangeEvaluation {
+        is_feasible: false,
+        hard_violations: vec![conflict.clone()],
+        warnings: Vec::new(),
+        score_delta: Score::default(),
+        score_components: Vec::new(),
+        explanations: vec![conflict.message],
+        // A refused batch changes nothing — the candidate is the baseline itself.
+        candidate: solution.clone(),
+    }
+}
+
+impl ChangeEvaluation {
+    fn from_conflicts(
+        conflicts: Vec<Conflict>,
+        score_delta: Score,
+        score_components: Vec<ScoreComponent>,
+        candidate: Solution,
+    ) -> Self {
+        let hard_violations = conflicts
+            .iter()
+            .filter(|conflict| conflict.severity == ConflictSeverity::Blocking)
+            .cloned()
+            .collect::<Vec<_>>();
+        let warnings = conflicts
+            .iter()
+            .filter(|conflict| conflict.severity == ConflictSeverity::Advisory)
+            .cloned()
+            .collect::<Vec<_>>();
+        Self {
+            is_feasible: hard_violations.is_empty(),
+            hard_violations,
+            warnings,
+            score_delta,
+            score_components,
+            explanations: conflicts
+                .into_iter()
+                .map(|conflict| conflict.message)
+                .collect(),
+            candidate,
+        }
     }
 }
 

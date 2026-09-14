@@ -8,7 +8,8 @@ mod state;
 
 pub use batch::{CancellationToken, CompiledProblem, SolveOptions, compile};
 pub use explain::{
-    Analysis, AssignmentChange, Bottleneck, MoveEvaluation, SolutionComparison, Suggestion, compare,
+    Analysis, AssignmentChange, Bottleneck, ChangeEvaluation, ChangeRequest, MoveEvaluation,
+    SolutionComparison, Suggestion, compare,
 };
 pub use model::{
     AbortReason, AcademicPeriod, Activity, ActivityId, ActivityRelation,
