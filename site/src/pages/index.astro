@@ -1,0 +1,106 @@
+---
+import {
+  Badge,
+  Badges,
+  BuildOutput,
+  CodeBlock,
+  Facts,
+  Features,
+  Hero,
+  Install,
+  Quickstart,
+  Terminal,
+} from '@casoon/pages-theme/components';
+import Base from '@casoon/pages-theme/layouts/Base.astro';
+import conflicts from '../../../examples/output/explain_conflicts.txt?raw';
+import plan from '../../../examples/output/workshop_plan.txt?raw';
+
+const quickstart = `use schedulr::{
+    Activity, ActivityId, Resource, ResourceId, ResourceRequirement,
+    SchedulingProblem, SolveStatus, TimeWindow, compile,
+};
+
+let room = Resource::new(ResourceId(1), "Physics lab", 1);
+let first = Activity::new(ActivityId(1), "first", TimeWindow::new(10, 20), 10)
+    .with_requirement(ResourceRequirement::new(room.id(), 1));
+let second = Activity::new(ActivityId(2), "second", TimeWindow::new(15, 25), 10)
+    .with_requirement(ResourceRequirement::new(room.id(), 1));
+
+let compiled = compile(&SchedulingProblem::new(vec![room], vec![], vec![first, second]))
+    .expect("problem compiles");
+let result = compiled.solve();
+if result.status != SolveStatus::Feasible {
+    for conflict in compiled.explain(&result) {
+        println!("{}: {}", conflict.constraint_name, conflict.message);
+    }
+}`;
+---
+
+<Base>
+  <Hero
+    title="Describe the plan, let the solver place it."
+    lead="schedulr is a scheduling framework for Rust. You describe activities, resources, people and time windows as plain data; schedulr compiles them into a constraint model, solves it with unifier, and explains every conflict in the terms you used."
+  >
+    <Install
+      commands={[
+        { label: 'cargo', command: 'cargo add schedulr' },
+        { label: 'Cargo.toml', command: 'schedulr = "0.8"' },
+      ]}
+    />
+    <Badges>
+      <Badge>MIT</Badge>
+      <Badge>crates.io 0.8.0</Badge>
+      <Badge>Rust 1.87+</Badge>
+      <Badge>built on unifier 0.3</Badge>
+    </Badges>
+    <Terminal slot="output" title="cargo run --example workshop_plan" dots ansi={plan} />
+  </Hero>
+
+  <Facts
+    items={[
+      { value: '1', label: 'dependency: the unifier constraint solver' },
+      { value: '3', label: 'score levels, compared lexicographically' },
+      { value: '0', label: 'solver searches for a single booking check' },
+      { value: '22', label: 'unit and integration tests on master' },
+    ]}
+  />
+
+  <Features
+    items={[
+      {
+        title: 'Domain types, not solver variables',
+        body: 'Resources, participants, activities, requirements and time windows are the whole public model. Solutions and conflicts come back in the same vocabulary, with your ids and names.',
+      },
+      {
+        title: 'Let the solver choose rooms and people',
+        body: 'Requirements can name an exact resource or ask for any resource of a type, with features, a minimum capacity or from a named pool. Participants come from pools, candidate lists or nested, overlapping groups.',
+      },
+      {
+        title: 'Calendars and preferences',
+        body: 'Periodic slot templates with absolute exceptions decide when activities may start. Score rules on Strong, Medium and Weak levels express preferences, and every solution lists how each rule scored.',
+      },
+      {
+        title: 'Book, explain and repair',
+        body: 'SchedulingState checks one create, move or cancel without a search. For batch plans there are explain, analyze, evaluate_move, suggest, compare and a repair that changes as little as possible.',
+      },
+    ]}
+  />
+
+  <BuildOutput
+    caption="Captured from the example programs in the repository by scripts/regenerate-examples.sh. Every output on this site comes from schedulr itself."
+    file="examples/output/explain_conflicts.txt"
+  >
+    <Terminal title="cargo run --example explain_conflicts" ansi={conflicts} />
+  </BuildOutput>
+
+  <Quickstart
+    lead="Three steps from a problem description to a plan or an explanation. The documentation covers the full DSL."
+    steps={[
+      'Add <code>schedulr</code> to your crate.',
+      'Describe resources, participants and activities, then <code>compile</code> the problem.',
+      'Call <code>solve()</code> and read the assignments, or <code>explain()</code> why no plan exists.',
+    ]}
+  >
+    <CodeBlock code={quickstart} lang="rust" title="main.rs" label="Rust" />
+  </Quickstart>
+</Base>

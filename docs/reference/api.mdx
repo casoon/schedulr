@@ -1,0 +1,91 @@
+---
+title: API overview
+sidebarLabel: API overview
+description: The entry points of the crate at a glance. Item-level documentation for the released version is on docs.rs.
+order: 1
+---
+
+Full generated documentation for the latest release: [docs.rs/schedulr](https://docs.rs/schedulr).
+Everything below is exported from the crate root (`use schedulr::…`).
+
+## Batch planning
+
+<ApiEntry
+  kind="fn"
+  name="compile"
+  since="since 0.1"
+  signature={`pub fn compile(problem: &SchedulingProblem) -> Result<CompiledProblem, CompileError>`}
+>
+  Validates the problem and builds the constraint model. All validation errors are collected into
+  one `CompileError`.
+</ApiEntry>
+
+<ApiEntry
+  kind="struct"
+  name="CompiledProblem"
+  signature={`impl CompiledProblem {
+    pub fn solve(&self) -> SolveResult
+    pub fn explain(&self, result: &SolveResult) -> Vec<Conflict>
+    pub fn analyze(&self) -> Analysis
+    pub fn evaluate_move(&self, solution: &Solution, activity: ActivityId, proposed: TimeWindow) -> MoveEvaluation
+    pub fn suggest(&self, solution: &Solution, proposed: TimeWindow) -> Vec<Suggestion>
+    pub fn repair(&self, baseline: &Solution, options: &RepairOptions) -> SolveResult
+}`}
+>
+  The compiled model. See [Analysis and repair](../../guides/analysis-and-repair/).
+</ApiEntry>
+
+<ApiEntry
+  kind="fn"
+  name="compare"
+  signature={`pub fn compare(before: &Solution, after: &Solution) -> SolutionComparison`}
+>
+  Lists added, removed and changed assignments and the score delta between two solutions.
+</ApiEntry>
+
+## Single-activity checks
+
+<ApiEntry
+  kind="struct"
+  name="SchedulingState"
+  since="since 0.1"
+  signature={`impl SchedulingState {
+    pub fn new(
+        resources: impl IntoIterator<Item = Resource>,
+        participants: impl IntoIterator<Item = Participant>,
+        resource_pools: impl IntoIterator<Item = ResourcePool>,
+    ) -> Self
+    pub fn check_feasibility(&self, proposal: &ProposedActivity) -> Vec<Conflict>
+    pub fn commit(&mut self, proposal: ProposedActivity) -> Result<ActivityId, Vec<Conflict>>
+    pub fn cancel(&mut self, activity: ActivityId) -> Option<(Activity, Assignment)>
+    pub fn proposal_for(&self, activity: ActivityId) -> Option<ProposedActivity>
+}`}
+>
+  In-memory booking state. See [Booking single activities](../../guides/booking-desk/).
+</ApiEntry>
+
+## Model types
+
+| Type | Role |
+| --- | --- |
+| `SchedulingProblem` | Everything the batch path needs, built with `with_*` methods |
+| `TimeWindow` | Half-open integer interval `[start, end)` |
+| `Resource`, `ResourcePool` | Capacity-constrained entities and named sets of them |
+| `Participant`, `ParticipantPool`, `ParticipantGroup`, `GroupMembership` | People, interchangeable sets, attending groups |
+| `Activity`, `ProposedActivity` | Batch demand, and one exact change for `SchedulingState` |
+| `ResourceRequirement`, `ParticipantRequirement` | Exact or solver-chosen resources and people |
+| `ScheduleTemplate`, `DayTemplate`, `SlotTemplate`, `BreakTemplate`, `AcademicPeriod` | Calendars (`BreakTemplate` unreleased) |
+| `ScoreRule`, `ScoreRuleKind`, `ScoreLevel` | Preferences |
+| `ActivityRelation`, `ActivityRelationConstraint` | Hard relations between activities (unreleased) |
+| `RepairOptions` | Settings for `repair` |
+
+## Result types
+
+| Type | Role |
+| --- | --- |
+| `SolveResult`, `SolveStatus`, `SolveStatistics` | Outcome of `solve` and `repair` |
+| `Solution`, `Assignment` | Placed activities with resources and participants |
+| `Score`, `ScoreComponent` | Aggregated score and per-rule contributions |
+| `Conflict`, `ConflictSeverity`, `EntityRef` | Structured conflicts, see [Conflicts and errors](../conflicts/) |
+| `CompileError` | All validation messages of a failed `compile` |
+| `Analysis`, `Bottleneck`, `MoveEvaluation`, `Suggestion`, `SolutionComparison`, `AssignmentChange` | Results of the analysis functions |

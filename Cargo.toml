@@ -9,6 +9,7 @@ repository = "https://github.com/casoon/schedulr"
 readme = "README.md"
 keywords = ["scheduling", "timetabling", "planning"]
 categories = ["algorithms", "mathematics"]
+exclude = ["site/**", "docs/**"]
 
 [dependencies]
 unifier = { version = "0.3.1", path = "../unifier" }

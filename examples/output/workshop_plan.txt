@@ -1,0 +1,26 @@
+Input: 3 resources, 3 participants, 5 activities, 1 resource pool, 1 participant pool, 1 group
+Calendar: 24-hour cycle, starts at 09 10 11 13 14 15, Tue 13:00-14:59 closed
+
+Status: Feasible (optimal: true)
+
+When              Activity              Resource      Participants
+Mon 09:00-10:00   a1 Kickoff            Room Aurora   Ana, Ben, Chris
+Mon 10:00-12:00   a4 Solver deep dive   Room Aurora   Chris
+Mon 13:00-16:00   a2 Rust fundamentals  Room Aurora   Ben
+Tue 09:00-11:00   a3 Hands-on lab       Lab 1         Ben
+Tue 15:00-16:00   a5 Q&A                Room Aurora   Ana, Ben, Chris
+
+Timeline (one column per hour, 09-16)
+              Mon                   Tue
+              09 10 11 12 13 14 15  09 10 11 12 13 14 15
+Room Aurora   a1 a4 a4 .. a2 a2 a2  .. .. .. .. .. .. a5
+Room Birch    .. .. .. .. .. .. ..  .. .. .. .. .. .. ..
+Lab 1         .. .. .. .. .. .. ..  a3 a3 .. .. .. .. ..
+Ana           a1 .. .. .. .. .. ..  .. .. .. .. .. .. a5
+Ben           a1 .. .. .. a2 a2 a2  a3 a3 .. .. .. .. a5
+Chris         a1 a4 a4 .. .. .. ..  .. .. .. .. .. .. a5
+
+Score: hard 0, strong 0, medium 0, weak 0
+  Strong  kickoff on Monday at 09:00  a1  0
+  Medium  Q&A on Tuesday afternoon    a5  0
+  Weak    lab on Tuesday morning      a3  0

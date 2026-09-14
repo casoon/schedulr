@@ -1,0 +1,18 @@
+Status: Feasible
+
+When          Activity            Resource      Participants
+09:00-10:00   a1 Welcome          Room Aurora
+13:00-15:00   a2 Theory           Room Aurora   Ana
+13:00-15:00   a5 Parallel track   Room Birch    Chris
+14:00-15:00   a6 Office hour      Library       Ben
+15:00-16:00   a3 Lab              Lab 1         Ana
+16:00-17:00   a4 Review           Room Birch    Ben
+
+Checks against the solution
+  Precedence (gap 1h)    a1 ends 10:00, a2 starts 13:00
+  Consecutive            a2 ends 15:00, a3 starts 15:00
+  Precedence (gap 0h)    a3 ends 16:00, a4 starts 16:00
+  SameStart              a2 and a5 both start at 13:00
+  NoOverlap              a1 09:00-10:00, a6 14:00-15:00
+  Lunch 12:00-13:00      0 activities overlap the break
+  Ben unavailable 09-13  a6 starts 14:00, a4 starts 16:00
