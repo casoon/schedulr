@@ -297,3 +297,37 @@ fn a_refused_batch_reports_its_candidate_but_never_mutates_the_baseline() {
     // … while the baseline this was evaluated against stays untouched.
     assert_eq!(baseline.assignments[0].window, TimeWindow::new(0, 1));
 }
+
+/// A stored solution can outlive the problem it was solved for (an activity was deleted
+/// since). Evaluating against it must be refused with an explanation, never panic — for a
+/// move of an activity that still exists as well as for a swap.
+#[test]
+fn a_stale_solution_is_refused_instead_of_panicking() {
+    let mut stale = baseline();
+    stale
+        .assignments
+        .push(Assignment::new(ActivityId(99), TimeWindow::new(2, 3)).with_resource(ResourceId(1)));
+
+    for changes in [
+        vec![ChangeRequest::Move {
+            activity: ActivityId(1),
+            window: TimeWindow::new(2, 3),
+        }],
+        vec![ChangeRequest::Swap {
+            first: ActivityId(1),
+            second: ActivityId(99),
+        }],
+    ] {
+        let evaluation = fixture().evaluate_changes(&stale, &changes);
+
+        assert!(!evaluation.is_feasible);
+        let violation = &evaluation.hard_violations[0];
+        assert_eq!(violation.constraint_name, "ActivityDomain");
+        assert_eq!(violation.involved, vec![ActivityId(99)]);
+        assert!(!evaluation.explanations.is_empty());
+        assert_eq!(
+            evaluation.candidate.assignments.len(),
+            stale.assignments.len()
+        );
+    }
+}

@@ -570,6 +570,10 @@ impl InternalCompiled {
         self.variables[&activity]
     }
 
+    pub(crate) fn knows_activity(&self, activity: ActivityId) -> bool {
+        self.variables.contains_key(&activity)
+    }
+
     pub(crate) fn check_incremental(
         &self,
         committed: &UnifierAssignment,

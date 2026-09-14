@@ -255,12 +255,24 @@ impl CompiledProblem {
     /// B4). Move and swap can be mixed in one batch; everything is applied to a private
     /// copy of the assignment, so a half-applied state can never be observed and the
     /// starting solution is never mutated. The first invalid request aborts the whole
-    /// batch with a blocking `ActivityDomain` violation.
+    /// batch with a blocking `ActivityDomain` violation — as does a starting solution that
+    /// names an activity the problem no longer contains (a stale solution).
     pub fn evaluate_changes(
         &self,
         solution: &Solution,
         changes: &[ChangeRequest],
     ) -> ChangeEvaluation {
+        if let Some(stale) = solution
+            .assignments
+            .iter()
+            .find(|assignment| !self.internal.knows_activity(assignment.activity))
+        {
+            return invalid_change(
+                stale.activity,
+                "solution refers to an activity that is not part of the problem",
+                solution,
+            );
+        }
         let mut committed = self.internal.assignment_map(solution);
         let windows = solution
             .assignments
