@@ -108,4 +108,4 @@ schedulr = "0.8"
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/casoon/schedulr/blob/master/LICENSE).
