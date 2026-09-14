@@ -453,6 +453,33 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         }
     }
 
+    // BucketLoadPattern: a group of activities must occupy one of the allowed teaching shapes per
+    // bucket (plan 25, C1). Unlike the load caps, this constrains the *shape* of the occupied
+    // intervals — consecutive blocks, so two adjacent periods count as one double block.
+    if !problem.bucket_load_patterns.is_empty() {
+        let ranges = load_bucket_ranges(problem, &expanded_activities);
+        for pattern in &problem.bucket_load_patterns {
+            if !pattern.is_active() {
+                continue;
+            }
+            let tasks = pattern_tasks_for(&expanded_activities, &variables, &pattern.activities);
+            if tasks.is_empty() {
+                continue;
+            }
+            let allowed: Vec<Vec<i64>> = pattern
+                .allowed
+                .iter()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| i64::try_from(*block).unwrap_or(i64::MAX))
+                        .collect()
+                })
+                .collect();
+            builder.add_bucket_block_pattern(tasks, ranges.clone(), allowed);
+        }
+    }
+
     // MinimumBreak: minimum distance between any two of an entity's deterministically assigned
     // activities. Multi-candidate pools are not paired (a distance may only apply when the entity
     // is selected for *both* activities, a condition the available primitives cannot express);
@@ -1503,6 +1530,30 @@ fn load_bucket_ranges(problem: &SchedulingProblem, activities: &[Activity]) -> V
     bucket_windows(problem.schedule_template.as_ref(), min_value, max_value)
         .into_iter()
         .map(|entry| BucketRange::new(entry.window.start, entry.window.end, entry.bucket))
+        .collect()
+}
+
+/// Collects the tasks a block-pattern rule constrains: one task per listed activity, always
+/// present (an activity's slot is decided in every solution, so the pattern can judge its shape).
+///
+/// Listed ids that are not part of the expanded model are skipped, mirroring [`load_tasks_for`]; a
+/// caller building the rule from the same activity list it hands to the problem therefore never
+/// loses an activity silently.
+fn pattern_tasks_for(
+    activities: &[Activity],
+    variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
+    activity_ids: &[ActivityId],
+) -> Vec<BucketedTask> {
+    activity_ids
+        .iter()
+        .filter_map(|id| {
+            let &(start, _) = variables.get(id)?;
+            Some(BucketedTask::new(
+                start,
+                duration_as_i64(duration_of(activities, *id)),
+                1,
+            ))
+        })
         .collect()
 }
 
