@@ -103,7 +103,7 @@ if result.status != SolveStatus::Feasible {
 ## Installation
 
 ```toml
-schedulr = "0.8"
+schedulr = "0.9"
 ```
 
 ## License

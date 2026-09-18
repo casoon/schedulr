@@ -26,9 +26,11 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 
 ## Versions
 
-The latest release on crates.io is **0.8.0**. The master branch additionally has breaks, per
-participant and per resource availability, and activity relations. Pages that describe them
-are marked as unreleased.
+The latest release on crates.io is **0.9.0**, and master carries nothing beyond it. It adds
+what 0.8.0 lacked: breaks, per participant and per resource availability, activity relations,
+baseline-aware repair, participant choice groups and `CompiledProblem::check`. A run now also
+constructs a feasible schedule before optimizing it, chooses how to spend its budget (see
+`SolveStrategy`), and never returns a schedule that violates hard constraints.
 
 ## Where it stops
 

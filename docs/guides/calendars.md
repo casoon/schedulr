@@ -46,7 +46,6 @@ An empty template (no slot at all) or a cycle length of zero or less is a compil
 
 ## Breaks
 
-> **Unreleased:** available on the master branch, not in the 0.8.0 release on crates.io.
 
 A `BreakTemplate` is a recurring pause inside a day. Its window is relative to the day, like a
 slot offset. A start is dropped if the activity would overlap the break:
@@ -64,7 +63,6 @@ With lunch from 12 to 13, a two-hour activity cannot start at 11 even if an 11:0
 
 ## Availability of participants and resources
 
-> **Unreleased:** available on the master branch, not in the 0.8.0 release on crates.io.
 
 `Participant::with_unavailable_range(start, end)` and `Resource::with_unavailable_range(start,
 end)` mark inclusive ranges in which the participant or resource cannot be booked:

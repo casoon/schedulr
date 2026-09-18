@@ -6,7 +6,6 @@ order: 3
 
 ## Activity relations
 
-> **Unreleased:** available on the master branch, not in the 0.8.0 release on crates.io.
 
 An `ActivityRelationConstraint` connects two activities with an `ActivityRelation`. It is a hard
 constraint: the solver never returns a solution that violates it.
