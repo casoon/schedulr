@@ -2,9 +2,9 @@ use schedulr::{
     AcademicPeriod, Activity, ActivityId, ActivityRelation, ActivityRelationConstraint,
     AssignmentChange, BreakTemplate, DayTemplate, GroupMembership, Participant, ParticipantGroup,
     ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
-    RepairOptions, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,
-    ScheduleTemplate, SchedulingProblem, ScoreLevel, ScoreRule, SlotTemplate, SolveStatus,
-    TimeWindow, compare, compile,
+    Recurrence, RepairOptions, Resource, ResourceId, ResourcePool, ResourcePoolId,
+    ResourceRequirement, ScheduleTemplate, SchedulingProblem, ScoreLevel, ScoreRule, SlotTemplate,
+    Solution, SolveStatus, TimeWindow, compare, compile,
 };
 use std::time::Duration;
 
@@ -370,4 +370,219 @@ fn analyze_runs_without_solving_and_repair_minimizes_changes() {
         .solution
         .unwrap();
     assert_eq!(compare(&baseline, &repaired).changes.len(), 1);
+}
+
+fn start_of(solution: &Solution, activity: ActivityId) -> i64 {
+    solution
+        .assignments
+        .iter()
+        .find(|assignment| assignment.activity == activity)
+        .expect("assignment for activity")
+        .window
+        .start
+}
+
+#[test]
+fn fixed_offset_relation_places_second_exactly_offset_after_first() {
+    // Activity 1 is pinned to start 3; activity 2 is otherwise free (and would naturally start at
+    // 0). FixedOffset { offset: 5 } must place activity 2 at `3 + 5 = 8` — second = first + offset.
+    let first = Activity::new(ActivityId(1), "anchor", TimeWindow::new(3, 4), 1);
+    let second = Activity::new(ActivityId(2), "lagged", TimeWindow::new(0, 12), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(
+            ActivityId(1),
+            ActivityId(2),
+            ActivityRelation::FixedOffset { offset: 5 },
+        ),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(start_of(&solution, ActivityId(2)), 8);
+}
+
+#[test]
+fn fixed_offset_relation_accepts_a_negative_offset() {
+    // `add_equal` supports both signs, so a negative offset must place `second` before `first`:
+    // activity 1 pinned to 5, offset -2 gives activity 2 a start of 3.
+    let first = Activity::new(ActivityId(1), "anchor", TimeWindow::new(5, 6), 1);
+    let second = Activity::new(ActivityId(2), "earlier", TimeWindow::new(0, 10), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(
+            ActivityId(1),
+            ActivityId(2),
+            ActivityRelation::FixedOffset { offset: -2 },
+        ),
+    );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(start_of(&solution, ActivityId(2)), 3);
+}
+
+#[test]
+fn fixed_offset_zero_behaves_exactly_like_same_start() {
+    let build = |relation: ActivityRelation| {
+        let pinned = Activity::new(ActivityId(1), "pinned", TimeWindow::new(3, 4), 1);
+        let free = Activity::new(ActivityId(2), "free", TimeWindow::new(0, 5), 1);
+        let problem = SchedulingProblem::new(vec![], vec![], vec![pinned, free]).with_relation(
+            ActivityRelationConstraint::new(ActivityId(1), ActivityId(2), relation),
+        );
+        compile(&problem).unwrap().solve().solution.unwrap()
+    };
+
+    let via_offset = build(ActivityRelation::FixedOffset { offset: 0 });
+    let via_same_start = build(ActivityRelation::SameStart);
+
+    assert_eq!(start_of(&via_offset, ActivityId(2)), 3);
+    assert_eq!(
+        start_of(&via_offset, ActivityId(2)),
+        start_of(&via_same_start, ActivityId(2))
+    );
+}
+
+#[test]
+fn violated_fixed_offset_is_infeasible() {
+    // Both windows force a start of 0, but the relation demands `second = first + 3`.
+    let first = Activity::new(ActivityId(1), "anchor", TimeWindow::new(0, 1), 1);
+    let second = Activity::new(ActivityId(2), "lagged", TimeWindow::new(0, 1), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second]).with_relation(
+        ActivityRelationConstraint::new(
+            ActivityId(1),
+            ActivityId(2),
+            ActivityRelation::FixedOffset { offset: 3 },
+        ),
+    );
+
+    let result = compile(&problem).unwrap().solve();
+    assert_eq!(result.status, SolveStatus::Infeasible);
+    assert!(result.solution.is_none());
+}
+
+#[test]
+fn fixed_offset_combined_with_capacity_limit_is_feasible_only_when_apart() {
+    let room = Resource::new(ResourceId(1), "Room", 1);
+    let build = |offset: i64| {
+        let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 5), 1)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 5), 1)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let problem = SchedulingProblem::new(vec![room.clone()], vec![], vec![first, second])
+            .with_relation(ActivityRelationConstraint::new(
+                ActivityId(1),
+                ActivityId(2),
+                ActivityRelation::FixedOffset { offset },
+            ));
+        compile(&problem).unwrap().solve()
+    };
+
+    // Offset 0 forces both one-unit activities onto the same start: the capacity-1 room rejects it.
+    assert_eq!(build(0).status, SolveStatus::Infeasible);
+    // Offset 1 lifts the second one time unit apart, so the single room can hold both.
+    assert_eq!(build(1).status, SolveStatus::Feasible);
+}
+
+#[test]
+fn recurring_activity_expands_instances_at_k_times_step() {
+    // The template is only a blueprint: three instances named by the caller, each with the
+    // template's duration and a window shifted by `k * step`.
+    let template = Activity::new(ActivityId(99), "slot", TimeWindow::new(0, 2), 2);
+    let recurrence = Recurrence {
+        step: 4,
+        instances: vec![
+            (0, ActivityId(10)),
+            (1, ActivityId(11)),
+            (2, ActivityId(12)),
+        ],
+    };
+    let problem = SchedulingProblem::new(vec![], vec![], vec![])
+        .with_recurring_activity(template, recurrence);
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(solution.assignments.len(), 3);
+    for (k, id) in [
+        (0_i64, ActivityId(10)),
+        (1, ActivityId(11)),
+        (2, ActivityId(12)),
+    ] {
+        let window = solution
+            .assignments
+            .iter()
+            .find(|assignment| assignment.activity == id)
+            .unwrap()
+            .window;
+        assert_eq!(window.start, k * 4);
+        assert_eq!(
+            window.end - window.start,
+            2,
+            "instance {k} keeps the duration"
+        );
+    }
+    // The template id itself is not part of the problem.
+    assert!(
+        !solution
+            .assignments
+            .iter()
+            .any(|assignment| assignment.activity == ActivityId(99))
+    );
+}
+
+#[test]
+fn recurring_activity_instance_index_controls_the_shift_not_the_vector_position() {
+    // The `u32` is the instance index k, not the position in the vector: unordered and
+    // non-contiguous indices must still be laid out at exactly `(k_j - k_i) * step` apart, even
+    // though the wide template window would let the solver place them freely.
+    let template = Activity::new(ActivityId(99), "slot", TimeWindow::new(0, 20), 1);
+    let recurrence = Recurrence {
+        step: 5,
+        instances: vec![
+            (0, ActivityId(10)),
+            (5, ActivityId(15)),
+            (2, ActivityId(12)),
+        ],
+    };
+    let problem = SchedulingProblem::new(vec![], vec![], vec![])
+        .with_recurring_activity(template, recurrence);
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    let anchor = start_of(&solution, ActivityId(10));
+    assert_eq!(start_of(&solution, ActivityId(12)) - anchor, 10);
+    assert_eq!(start_of(&solution, ActivityId(15)) - anchor, 25);
+    assert_eq!(
+        start_of(&solution, ActivityId(15)) - start_of(&solution, ActivityId(12)),
+        15
+    );
+}
+
+#[test]
+fn recurring_activities_of_different_templates_only_compete_on_overlapping_windows() {
+    let room = Resource::new(ResourceId(1), "Room", 1);
+    let template = |id: ActivityId, window: TimeWindow| {
+        Activity::new(id, "slot", window, 2)
+            .with_requirement(ResourceRequirement::new(room.id(), 1))
+    };
+    let build = |second_window: TimeWindow| {
+        compile(
+            &SchedulingProblem::new(vec![room.clone()], vec![], vec![])
+                .with_recurring_activity(
+                    template(ActivityId(1), TimeWindow::new(0, 2)),
+                    Recurrence {
+                        step: 0,
+                        instances: vec![(0, ActivityId(11))],
+                    },
+                )
+                .with_recurring_activity(
+                    template(ActivityId(2), second_window),
+                    Recurrence {
+                        step: 0,
+                        instances: vec![(0, ActivityId(12))],
+                    },
+                ),
+        )
+        .unwrap()
+        .solve()
+    };
+
+    // Disjoint windows: the two instances never touch the same time unit, so one room is enough.
+    assert_eq!(build(TimeWindow::new(2, 4)).status, SolveStatus::Feasible);
+    // Overlapping windows: both instances need the same single-unit slot, so it is infeasible.
+    assert_eq!(build(TimeWindow::new(0, 2)).status, SolveStatus::Infeasible);
 }

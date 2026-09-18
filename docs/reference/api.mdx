@@ -26,13 +26,27 @@ Everything below is exported from the crate root (`use schedulr::…`).
   signature={`impl CompiledProblem {
     pub fn solve(&self) -> SolveResult
     pub fn explain(&self, result: &SolveResult) -> Vec<Conflict>
+    pub fn check(&self, solution: &Solution) -> SolutionCheck
     pub fn analyze(&self) -> Analysis
     pub fn evaluate_move(&self, solution: &Solution, activity: ActivityId, proposed: TimeWindow) -> MoveEvaluation
     pub fn suggest(&self, solution: &Solution, proposed: TimeWindow) -> Vec<Suggestion>
     pub fn repair(&self, baseline: &Solution, options: &RepairOptions) -> SolveResult
+    pub fn repair_with_outcome(&self, baseline: &Solution, options: &RepairOptions) -> RepairResult
 }`}
 >
   The compiled model. See [Analysis and repair](../../guides/analysis-and-repair/).
+</ApiEntry>
+
+<ApiEntry
+  kind="fn"
+  name="check"
+  since="unreleased"
+  signature={`pub fn check(&self, solution: &Solution) -> SolutionCheck`}
+>
+  Evaluates every constraint against a complete or partial solution without changing it. A
+  missing assignment is a blocking `Unassigned` conflict, an unknown activity a blocking
+  `ActivityDomain` conflict. Equivalent to the union of the per-assignment no-op probes, in one
+  call.
 </ApiEntry>
 
 <ApiEntry
@@ -78,7 +92,8 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | `ScheduleTemplate`, `DayTemplate`, `SlotTemplate`, `BreakTemplate`, `AcademicPeriod` | Calendars (`BreakTemplate` unreleased) |
 | `ScoreRule`, `ScoreRuleKind`, `ScoreLevel` | Preferences |
 | `ActivityRelation`, `ActivityRelationConstraint` | Hard relations between activities (unreleased) |
-| `RepairOptions` | Settings for `repair` |
+| `RepairOptions` | Settings for `repair`: start and assignment penalties, `frozen` activities, cancellation, time limit |
+| `RepairOutcome`, `RepairResult` | Whether `repair_with_outcome` repaired or fell back to `solve` (unreleased) |
 
 ## Result types
 
@@ -86,6 +101,7 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | --- | --- |
 | `SolveResult`, `SolveStatus`, `SolveStatistics` | Outcome of `solve` and `repair` |
 | `Solution`, `Assignment` | Placed activities with resources and participants |
+| `SolutionCheck` | Full verdict on one solution: feasibility, conflicts, score (unreleased) |
 | `Score`, `ScoreComponent` | Aggregated score and per-rule contributions |
 | `Conflict`, `ConflictSeverity`, `EntityRef` | Structured conflicts, see [Conflicts and errors](../conflicts/) |
 | `CompileError` | All validation messages of a failed `compile` |

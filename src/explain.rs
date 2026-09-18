@@ -82,6 +82,40 @@ pub enum AssignmentChange {
     },
 }
 
+/// Which aspects of an assignment differ between two solutions.
+///
+/// A domain-free answer to "what changed?": the scheduler does not know whether a
+/// participant is a teacher or a class, so it reports the *kind* of difference and
+/// leaves the classification to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChangeAspects {
+    /// The assignment's time window changed (or the assignment appeared/disappeared).
+    pub time: bool,
+    /// The booked resources changed (or the assignment appeared/disappeared).
+    pub resources: bool,
+    /// The involved participants changed (or the assignment appeared/disappeared).
+    pub participants: bool,
+}
+
+impl AssignmentChange {
+    /// The aspects this change touches. `Added`/`Removed` touch every aspect — the
+    /// assignment as a whole appears or disappears, so no field is "unchanged".
+    pub fn aspects(&self) -> ChangeAspects {
+        match self {
+            AssignmentChange::Added(_) | AssignmentChange::Removed(_) => ChangeAspects {
+                time: true,
+                resources: true,
+                participants: true,
+            },
+            AssignmentChange::Changed { before, after } => ChangeAspects {
+                time: before.window != after.window,
+                resources: before.resources != after.resources,
+                participants: before.participants != after.participants,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolutionComparison {
     pub changes: Vec<AssignmentChange>,

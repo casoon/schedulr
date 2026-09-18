@@ -3,7 +3,8 @@ use crate::model::{
     ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
     ParticipantRequirement, Resource, ResourceId, ResourcePool, ResourceRequirement,
     SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SoftGoal,
-    SoftGoalKind, Solution, SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_windows,
+    SoftGoalKind, Solution, SolutionCheck, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
+    bucket_windows,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -17,8 +18,8 @@ use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
 use unifier::score::{Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel};
 pub use unifier::solver::CancellationToken;
 use unifier::solver::{
-    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, SolveOutcome,
-    SolveStatus as UnifierSolveStatus, SolverOptions,
+    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, SearchStatistics,
+    SharedIncumbent, SolveOutcome, SolveStatus as UnifierSolveStatus, SolverOptions,
 };
 use unifier::{ForbiddenValues, ModelBuilder, VariableId};
 
@@ -40,6 +41,22 @@ impl Default for SolveOptions {
             time_limit: Some(Duration::from_secs(10)),
             cancellation_token: None,
         }
+    }
+}
+
+/// Divides the run's time limit into the share [`CompiledProblem::search`] gives its
+/// construction phase before the optimizer takes over.
+///
+/// Construction stops at the first hard-feasible assignment, so it only spends its whole share
+/// on problems where it finds none — and there the remainder is not lost either, it goes to an
+/// unseeded optimizer run, which is exactly what a single-phase search would have done.
+const CONSTRUCTION_BUDGET_DIVISOR: u32 = 2;
+
+fn solver_options(time_limit: Option<Duration>, options: &SolveOptions) -> SolverOptions {
+    SolverOptions {
+        time_limit,
+        cancellation_token: options.cancellation_token.clone(),
+        ..SolverOptions::default()
     }
 }
 
@@ -68,10 +85,39 @@ pub(crate) struct InternalCompiled {
 }
 
 pub fn compile(problem: &SchedulingProblem) -> Result<CompiledProblem, CompileError> {
-    build_problem_internal(problem).map(|internal| CompiledProblem {
+    compile_with_stability(problem, None)
+}
+
+/// Compiles `problem`, optionally attaching the baseline-stability preference and frozen domains
+/// [`crate::repair`] needs (plan 31, E0.2). Crate-internal: stability never becomes part of the
+/// public [`SchedulingProblem`] vocabulary.
+pub(crate) fn compile_with_stability(
+    problem: &SchedulingProblem,
+    stability: Option<&StabilityBaseline>,
+) -> Result<CompiledProblem, CompileError> {
+    build_problem_internal(problem, stability).map(|internal| CompiledProblem {
         internal,
         problem: problem.clone(),
     })
+}
+
+/// Baseline values a stable repair holds on to (plan 31, E0.2).
+///
+/// `assignment_change_penalty` is the `Strong` penalty for a presence variable deviating from its
+/// baseline value; `frozen` activities have their time **and** resource/participant selections
+/// fixed to the baseline domain values.
+#[derive(Debug)]
+pub(crate) struct StabilityBaseline {
+    pub(crate) assignments: BTreeMap<ActivityId, StabilityAssignment>,
+    pub(crate) assignment_change_penalty: i64,
+    pub(crate) frozen: BTreeSet<ActivityId>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StabilityAssignment {
+    pub(crate) start: i64,
+    pub(crate) resources: BTreeSet<ResourceId>,
+    pub(crate) participants: BTreeSet<ParticipantId>,
 }
 
 impl CompiledProblem {
@@ -82,19 +128,72 @@ impl CompiledProblem {
         self.solve_with(&SolveOptions::default())
     }
 
-    /// Solves under the given [`SolveOptions`] (time limit, cancellation).
+    /// Solves under the given [`SolveOptions`] (time limit, cancellation), constructing a
+    /// feasible schedule first and optimizing it with whatever budget is left (see
+    /// [`CompiledProblem::search`]).
     pub fn solve_with(&self, options: &SolveOptions) -> SolveResult {
-        let solver_options = SolverOptions {
-            time_limit: options.time_limit,
-            cancellation_token: options.cancellation_token.clone(),
-            ..SolverOptions::default()
-        };
-        let outcome = if self.internal.graph.objectives().is_empty() {
-            BacktrackingSolver::new().solve(&self.internal.graph, &solver_options)
+        self.internal.solve_result(self.search(options))
+    }
+
+    /// Searches in two phases — construct, then optimize — and returns whichever produced the
+    /// better schedule.
+    ///
+    /// Branch & Bound records a solution only once it reaches a *complete* assignment, so on a
+    /// problem whose first complete assignment sits deep in the tree it can spend the entire
+    /// budget and return nothing at all. Splitting the run decouples the two questions: phase
+    /// one asks "does any assignment satisfy the hard constraints" and stops at the first one
+    /// it finds; phase two spends the remaining budget improving that assignment's objectives,
+    /// bounded by it from its first node onwards instead of searching unbounded.
+    ///
+    /// The schedule from phase one is never lost: if the optimizer runs out of time before it
+    /// can so much as adopt the incumbent, its empty outcome is dropped in favour of phase
+    /// one's. A run therefore returns a feasible schedule whenever one was reachable at all.
+    fn search(&self, options: &SolveOptions) -> SolveOutcome {
+        let graph = &self.internal.graph;
+        if graph.objectives().is_empty() {
+            // Nothing to optimize, so construction is already the whole search.
+            return BacktrackingSolver::new()
+                .solve(graph, &solver_options(options.time_limit, options));
+        }
+
+        let construction_limit = options
+            .time_limit
+            .map(|limit| limit / CONSTRUCTION_BUDGET_DIVISOR);
+        let construction =
+            BacktrackingSolver::new().solve(graph, &solver_options(construction_limit, options));
+
+        // Objectives cannot make unsatisfiable hard constraints satisfiable, so an exhausted
+        // construction search proves infeasibility for the whole run, not just for phase one.
+        if construction.status == UnifierSolveStatus::Infeasible {
+            return construction;
+        }
+
+        let construction_statistics = construction.statistics;
+        let mut optimizer_options = solver_options(
+            options
+                .time_limit
+                .map(|limit| limit.saturating_sub(construction_statistics.elapsed)),
+            options,
+        );
+        if let Some(solution) = &construction.solution {
+            let incumbent = SharedIncumbent::new();
+            incumbent.offer(&solution.assignment, solution.score);
+            optimizer_options.shared_incumbent = Some(incumbent);
+        }
+
+        let optimized = BranchAndBoundSolver::new().solve(graph, &optimizer_options);
+        let optimizer_statistics = optimized.statistics;
+        let mut outcome = if optimized.solution.is_some() {
+            optimized
         } else {
-            BranchAndBoundSolver::new().solve(&self.internal.graph, &solver_options)
+            construction
         };
-        self.internal.solve_result(outcome)
+        outcome.statistics = SearchStatistics {
+            nodes_expanded: construction_statistics.nodes_expanded
+                + optimizer_statistics.nodes_expanded,
+            elapsed: construction_statistics.elapsed + optimizer_statistics.elapsed,
+        };
+        outcome
     }
 
     pub fn explain(&self, result: &SolveResult) -> Vec<Conflict> {
@@ -134,6 +233,17 @@ impl CompiledProblem {
         }
         self.internal.conflicts_from_violations(violations)
     }
+
+    /// Checks a complete or partial [`Solution`] against every constraint without changing it
+    /// (plan 31, E0.1). Equivalent to the union of the no-op probes
+    /// [`CompiledProblem::evaluate_move`] would run per assignment, but in one call.
+    ///
+    /// Unknown activities become a blocking `ActivityDomain` conflict each, activities the
+    /// solution omits a blocking `Unassigned` conflict each — a partial solution is reported,
+    /// never rejected by a panic.
+    pub fn check(&self, solution: &Solution) -> SolutionCheck {
+        self.internal.check(solution)
+    }
 }
 
 pub(crate) fn build_internal(
@@ -148,10 +258,13 @@ pub(crate) fn build_internal(
         activities.to_vec(),
     );
     problem.resource_pools = resource_pools.to_vec();
-    build_problem_internal(&problem)
+    build_problem_internal(&problem, None)
 }
 
-fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompiled, CompileError> {
+fn build_problem_internal(
+    problem: &SchedulingProblem,
+    stability: Option<&StabilityBaseline>,
+) -> Result<InternalCompiled, CompileError> {
     let mut errors = validate_input(problem);
     let expanded_activities = expand_group_participants(problem, &mut errors);
     if !errors.is_empty() {
@@ -269,6 +382,62 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         return Err(CompileError::new(errors));
     }
 
+    // ParticipantChoiceGroup (plan 33.1): every activity of a group must pick the same
+    // participant, so their candidate sets are intersected. An empty intersection can never be
+    // satisfied and is refused here, with an explanation, instead of surfacing as an opaque
+    // infeasibility later.
+    let candidate_sets: BTreeMap<ActivityId, BTreeSet<ParticipantId>> = expanded_activities
+        .iter()
+        .map(|activity| {
+            let candidates = activity
+                .participant_requirements()
+                .iter()
+                .filter(|requirement| requirement.exact_participant().is_none())
+                .flat_map(|requirement| resolve_participant_requirement(problem, requirement))
+                .collect::<BTreeSet<_>>();
+            (activity.id(), candidates)
+        })
+        .collect();
+    for group in &problem.participant_choice_groups {
+        let mut intersection: Option<BTreeSet<ParticipantId>> = None;
+        for activity in &group.activities {
+            let Some(candidates) = candidate_sets.get(activity) else {
+                errors.push(format!(
+                    "participant choice group references unknown activity {activity}"
+                ));
+                continue;
+            };
+            if candidates.is_empty() {
+                errors.push(format!(
+                    "activity {activity} in a participant choice group has no flexible participant \
+                     requirement to agree on"
+                ));
+                continue;
+            }
+            intersection = Some(match intersection {
+                None => candidates.clone(),
+                Some(current) => current.intersection(candidates).copied().collect(),
+            });
+        }
+        if let Some(intersection) = intersection
+            && intersection.is_empty()
+        {
+            errors.push(format!(
+                "participant choice group [{}] has no common candidate: the activities cannot \
+                 agree on one participant",
+                group
+                    .activities
+                    .iter()
+                    .map(|activity| activity.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(CompileError::new(errors));
+    }
+
     let mut selected_resources: BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>> =
         BTreeMap::new();
     let mut selected_participants: BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>> =
@@ -290,6 +459,11 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
             }
             ActivityRelation::Precedence { min_gap } => {
                 builder.add_precedence(first_interval, second_interval, min_gap);
+            }
+            ActivityRelation::FixedOffset { offset } => {
+                // `add_equal(v1, v2, k)` means `v1 = v2 + k`; the relation wants
+                // `second.start = first.start + offset`, so `second` is `v1`.
+                builder.add_equal(second_interval.start(), first_interval.start(), offset);
             }
             ActivityRelation::NoOverlap => {
                 let first_duration = duration_of(&expanded_activities, relation.first);
@@ -378,6 +552,53 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
                     demand: 1,
                     presence: Some(presence),
                 });
+        }
+    }
+
+    // Each candidate of a participant choice group gets one equality constraint over its
+    // presence variables, forcing every activity in the group to select it together (plan 33.1).
+    for group in &problem.participant_choice_groups {
+        let candidate_sets: Vec<BTreeSet<ParticipantId>> = group
+            .activities
+            .iter()
+            .map(|activity| {
+                selected_participants
+                    .get(activity)
+                    .into_iter()
+                    .flatten()
+                    .map(|(participant, _)| *participant)
+                    .collect()
+            })
+            .collect();
+        let mut intersection = candidate_sets.first().cloned().unwrap_or_default();
+        for set in candidate_sets.iter().skip(1) {
+            intersection = intersection.intersection(set).copied().collect();
+        }
+        for candidate in intersection {
+            let presences: Vec<VariableId> = group
+                .activities
+                .iter()
+                .filter_map(|activity| {
+                    selected_participants.get(activity).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .find(|(participant, _)| *participant == candidate)
+                            .map(|(_, presence)| *presence)
+                    })
+                })
+                .collect();
+            if presences.len() == group.activities.len() {
+                let mut scope = presences.clone();
+                scope.extend(
+                    group
+                        .activities
+                        .iter()
+                        .filter_map(|activity| variables.get(activity).map(|(start, _)| *start)),
+                );
+                builder.add_constraint(Arc::new(ParticipantChoiceGroupConstraint::new(
+                    presences, scope,
+                )));
+            }
         }
     }
 
@@ -523,6 +744,17 @@ fn build_problem_internal(problem: &SchedulingProblem) -> Result<InternalCompile
         }
     }
 
+    if let Some(stability) = stability {
+        apply_stability(
+            &mut builder,
+            stability,
+            &expanded_activities,
+            &variables,
+            &selected_resources,
+            &selected_participants,
+        );
+    }
+
     for rule in &problem.score_rules {
         let Some(&(start, _)) = variables.get(&rule.activity) else {
             continue;
@@ -621,6 +853,69 @@ impl InternalCompiled {
             }
         }
         assignment
+    }
+
+    pub(crate) fn check(&self, solution: &Solution) -> SolutionCheck {
+        let mut hard_violations = Vec::new();
+        let mut warnings = Vec::new();
+
+        for assignment in &solution.assignments {
+            if !self.knows_activity(assignment.activity) {
+                hard_violations.push(Conflict {
+                    severity: ConflictSeverity::Blocking,
+                    constraint_name: "ActivityDomain".to_string(),
+                    involved: vec![assignment.activity],
+                    entity: Some(EntityRef::Activity(assignment.activity)),
+                    message: "solution refers to an activity that is not part of the problem"
+                        .to_string(),
+                });
+            }
+        }
+
+        let assigned = solution
+            .assignments
+            .iter()
+            .map(|assignment| assignment.activity)
+            .collect::<BTreeSet<_>>();
+        hard_violations.extend(
+            self.variables
+                .keys()
+                .filter(|activity| !assigned.contains(activity))
+                .map(|&activity| Conflict {
+                    severity: ConflictSeverity::Blocking,
+                    constraint_name: "Unassigned".to_string(),
+                    involved: vec![activity],
+                    entity: Some(EntityRef::Activity(activity)),
+                    message: format!("activity {activity} is not assigned"),
+                }),
+        );
+
+        let assignment = self.assignment_map(solution);
+        let proposed = assignment
+            .iter()
+            .map(|(&variable, &value)| (variable, value));
+        for conflict in self.conflicts_from_violations(
+            self.graph
+                .check_incremental(&UnifierAssignment::new(), &proposed.collect::<Vec<_>>()),
+        ) {
+            match conflict.severity {
+                ConflictSeverity::Blocking => hard_violations.push(conflict),
+                ConflictSeverity::Advisory => warnings.push(conflict),
+            }
+        }
+
+        SolutionCheck {
+            is_feasible: hard_violations.is_empty(),
+            explanations: hard_violations
+                .iter()
+                .chain(&warnings)
+                .map(|conflict| conflict.message.clone())
+                .collect(),
+            hard_violations,
+            warnings,
+            score: self.score_for(&assignment),
+            score_components: self.score_components(&assignment),
+        }
     }
 
     pub(crate) fn score_for(&self, assignment: &UnifierAssignment) -> Score {
@@ -1331,6 +1626,122 @@ impl Objective for RuleObjective {
     }
 }
 
+/// Attaches the baseline-stability preferences and frozen domains of a stable repair (plan 31,
+/// E0.2): each presence variable gets a `Strong` "stay at the baseline value" objective, and every
+/// frozen activity has its time and selection variables narrowed to the baseline values.
+fn apply_stability(
+    builder: &mut ModelBuilder,
+    stability: &StabilityBaseline,
+    activities: &[Activity],
+    variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
+    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+) {
+    for (activity, baseline) in &stability.assignments {
+        let Some(&(start, end)) = variables.get(activity) else {
+            continue;
+        };
+        if let Some(candidates) = selected_resources.get(activity) {
+            for &(resource, presence) in candidates {
+                builder.add_scored_objective(
+                    "stability",
+                    score_level(ScoreLevel::Strong),
+                    Arc::new(PresenceObjective::new(
+                        presence,
+                        i64::from(baseline.resources.contains(&resource)),
+                        stability.assignment_change_penalty,
+                    )),
+                );
+            }
+        }
+        if let Some(candidates) = selected_participants.get(activity) {
+            for &(participant, presence) in candidates {
+                builder.add_scored_objective(
+                    "stability",
+                    score_level(ScoreLevel::Strong),
+                    Arc::new(PresenceObjective::new(
+                        presence,
+                        i64::from(baseline.participants.contains(&participant)),
+                        stability.assignment_change_penalty,
+                    )),
+                );
+            }
+        }
+        if !stability.frozen.contains(activity) {
+            continue;
+        }
+        builder.add_allowed_values(start, [baseline.start]);
+        builder.add_allowed_values(
+            end,
+            [baseline
+                .start
+                .saturating_add(duration_as_i64(duration_of(activities, *activity)))],
+        );
+        for &(resource, presence) in selected_resources.get(activity).into_iter().flatten() {
+            builder.add_allowed_values(
+                presence,
+                [i64::from(baseline.resources.contains(&resource))],
+            );
+        }
+        for &(participant, presence) in selected_participants.get(activity).into_iter().flatten() {
+            builder.add_allowed_values(
+                presence,
+                [i64::from(baseline.participants.contains(&participant))],
+            );
+        }
+    }
+}
+
+/// Penalises a presence variable that leaves its baseline value (plan 31, E0.2) — the
+/// assignment-side analogue of [`RuleObjective`]'s `KeepStart`.
+#[derive(Debug, Clone)]
+struct PresenceObjective {
+    variable: VariableId,
+    target: i64,
+    weight: i64,
+    scope: [VariableId; 1],
+}
+
+impl PresenceObjective {
+    fn new(variable: VariableId, target: i64, weight: i64) -> Self {
+        Self {
+            variable,
+            target,
+            weight,
+            scope: [variable],
+        }
+    }
+}
+
+impl Objective for PresenceObjective {
+    fn name(&self) -> &str {
+        "StabilityAssignment"
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        if assignment.get(&self.variable) == Some(&self.target) {
+            0
+        } else {
+            self.weight.saturating_neg()
+        }
+    }
+
+    fn optimistic_bound(&self, domains: &HashMap<VariableId, Domain>) -> i64 {
+        if domains
+            .get(&self.variable)
+            .is_some_and(|domain| domain.contains(self.target))
+        {
+            0
+        } else {
+            self.weight.saturating_neg()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SelectedTask {
     start: VariableId,
@@ -1432,6 +1843,88 @@ impl Constraint for SelectedResourceCapacity {
 
     fn propagate(&self, _domains: &mut TrailedDomains) -> PropagationResult {
         PropagationResult::Success { changed: false }
+    }
+}
+
+/// One participant's presence variables, across the activities of a [`ParticipantChoiceGroup`],
+/// must all carry the same value (plan 33.1). Named so a violation reaches `check` and
+/// `evaluate_changes` under the stable key `ParticipantChoiceGroup` instead of a generic `Equal`.
+#[derive(Debug, Clone)]
+struct ParticipantChoiceGroupConstraint {
+    presences: Vec<VariableId>,
+    scope: Vec<VariableId>,
+}
+
+impl ParticipantChoiceGroupConstraint {
+    /// `presences` are the candidate's presence variables; `scope` additionally carries the
+    /// member activities' time variables so a `check_incremental` after any move re-validates the
+    /// group's agreement instead of skipping a constraint whose presence variables did not move.
+    fn new(presences: Vec<VariableId>, scope: Vec<VariableId>) -> Self {
+        let mut presences = presences;
+        presences.sort_unstable();
+        presences.dedup();
+        let mut scope = scope;
+        scope.sort_unstable();
+        scope.dedup();
+        Self { presences, scope }
+    }
+}
+
+impl Constraint for ParticipantChoiceGroupConstraint {
+    fn name(&self) -> &str {
+        "ParticipantChoiceGroup"
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn is_satisfied(&self, assignment: &HashMap<VariableId, i64>) -> bool {
+        let mut values = self.presences.iter().filter_map(|var| assignment.get(var));
+        let Some(&first) = values.next() else {
+            return true;
+        };
+        values.all(|&value| value == first)
+    }
+
+    fn explain(&self, assignment: &UnifierAssignment) -> Option<Explanation> {
+        (!self.is_satisfied(assignment)).then(|| Explanation {
+            constraint_name: "ParticipantChoiceGroup",
+            involved: self.presences.clone(),
+            message: "the group's activities must choose the same participant".to_string(),
+        })
+    }
+
+    fn propagate(&self, domains: &mut TrailedDomains) -> PropagationResult {
+        // Presence variables are 0/1. Equality means every domain must keep the common
+        // intersection: if one is fixed to 1 all others are too, and vice versa.
+        let mut all_zero = true;
+        let mut all_one = true;
+        for &var in &self.presences {
+            if let Some(domain) = domains.get(&var) {
+                all_zero &= domain.contains(0);
+                all_one &= domain.contains(1);
+            }
+        }
+        let mut changed = false;
+        for &var in &self.presences {
+            if let Some(domain_changed) = domains.mutate(var, |domain| {
+                let mut modified = false;
+                if !all_zero {
+                    modified |= domain.remove(0);
+                }
+                if !all_one {
+                    modified |= domain.remove(1);
+                }
+                modified
+            }) {
+                changed |= domain_changed;
+            }
+            if domains.get(&var).is_some_and(|domain| domain.is_empty()) {
+                return PropagationResult::Conflict;
+            }
+        }
+        PropagationResult::Success { changed }
     }
 }
 

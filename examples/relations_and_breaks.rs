@@ -180,6 +180,16 @@ fn main() {
                     clock(second.start)
                 ),
             ),
+            ActivityRelation::FixedOffset { offset } => (
+                format!("FixedOffset (offset {offset})"),
+                format!(
+                    "{} starts {}, {} starts {}",
+                    relation.first,
+                    clock(first.start),
+                    relation.second,
+                    clock(second.start)
+                ),
+            ),
             ActivityRelation::NoOverlap => (
                 "NoOverlap".to_string(),
                 format!(

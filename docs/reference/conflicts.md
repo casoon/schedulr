@@ -6,8 +6,8 @@ order: 2
 
 ## Conflict
 
-`explain`, `SchedulingState::check_feasibility`, `commit` and `evaluate_move` report problems as
-`Conflict` values:
+`explain`, `check`, `SchedulingState::check_feasibility`, `commit` and `evaluate_move` report
+problems as `Conflict` values:
 
 | Field | Content |
 | --- | --- |
@@ -40,7 +40,8 @@ let problem = SchedulingProblem::new(resources, participants, activities)
 | `PeriodicValues` | A start lies outside the slot calendar or on an exception |
 | `ForbiddenValues` | A start lies in an unavailable range of a resource or participant |
 | `Model` | `SchedulingState` received invalid input, for example an unknown activity to exclude |
-| `ActivityDomain` | `evaluate_move` got an unknown activity or a window outside the activity's domain |
+| `ActivityDomain` | `evaluate_move` got an unknown activity or a window outside the activity's domain, or `check` got an assignment for an activity the problem does not contain |
+| `Unassigned` | `check` found a modeled activity without an assignment in the solution |
 
 Messages for overlaps name the intervals, for example:
 

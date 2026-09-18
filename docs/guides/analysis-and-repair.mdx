@@ -29,6 +29,30 @@ Blocking AlternativeResourceCapacity [a1, a2, a3]: Room Aurora: capacity 1 is in
 `explain` finds conflicts that are visible from fixed windows and capacities. It does not compute
 a minimal set of conflicting constraints for every infeasible problem.
 
+## check
+
+`check(&solution)` is the whole-solution counterpart of `evaluate_move`: one call evaluates every
+constraint against a complete or partial `Solution` without changing it. The `SolutionCheck` has
+the same verdict fields as a change evaluation — `is_feasible`, `hard_violations`, `warnings`,
+`explanations`, plus the absolute `score` and `score_components` of the checked plan. It is what a
+stored version should be validated with; it replaces one no-op move per assignment.
+
+It is stricter than `evaluate_move` about completeness, on purpose:
+
+- an assignment naming an activity the problem does not contain is a blocking `ActivityDomain`
+  conflict for each such activity — never a panic;
+- a modeled activity without an assignment is a blocking `Unassigned` conflict, so a partial
+  solution is explicit instead of silently accepted.
+
+```rust
+let check = compiled.check(&stored_version);
+if !check.is_feasible {
+    for conflict in &check.hard_violations {
+        eprintln!("{}", conflict.message);
+    }
+}
+```
+
 ## analyze
 
 `analyze()` estimates pressure without solving. For each resource and participant it compares the
@@ -65,19 +89,36 @@ activity was added) and tries to keep the baseline:
 
 - every activity of the baseline gets a `Strong` rule that penalises a start different from its
   baseline start by `change_penalty`;
+- every resource/participant selection that the solver is free to choose gets a `Strong` rule
+  that penalises a value different from the baseline by `assignment_change_penalty`, so a
+  repair cannot silently swap people or rooms elsewhere in the plan;
+- activities listed in `frozen` are pinned entirely (time, participants, resources) to their
+  baseline values;
 - a large neighbourhood search (LNS) starts from the baseline, repeatedly frees a fraction of the
-  activities and re-solves them, until `time_limit`.
+  activities and re-solves them, until `time_limit` or the `cancellation` token stops it.
 
 ```rust
-use schedulr::RepairOptions;
+use schedulr::{ActivityId, RepairOptions};
 use std::time::Duration;
 
-let repaired = compiled.repair(&baseline, &RepairOptions {
+let outcome = compiled.repair_with_outcome(&baseline, &RepairOptions {
     time_limit: Duration::from_millis(100),
+    frozen: [ActivityId(1)].into_iter().collect(),
     ..RepairOptions::default()
 });
+if outcome.outcome == schedulr::RepairOutcome::FellBackToSolve {
+    // Compilation failed; the result is a fresh solve, not a repair of the baseline.
+}
+let repaired = outcome.result;
 ```
 
-The defaults are `change_penalty: 1_000_000`, `destroy_fraction: 0.3` and a time limit of one
-second. Because the stability rules sit on the `Strong` level, they outweigh all `Medium` and
-`Weak` preferences; your own `Strong` rules compete with them through their weights.
+The defaults are `change_penalty: 1_000_000`, `assignment_change_penalty: None` (which means: use
+`change_penalty`, so both stay aligned unless you set the assignment penalty explicitly), no frozen
+activities, no cancellation token, `destroy_fraction: 0.3` and a time limit of one second. Because
+the stability rules sit on the `Strong` level, they outweigh all `Medium` and `Weak` preferences;
+your own `Strong` rules compete with them through their weights.
+
+`repair` returns the same `SolveResult` as `repair_with_outcome(...).result`. If the
+stability-augmented problem does not compile (for example a baseline naming an activity the
+problem no longer contains), `repair_with_outcome` reports `RepairOutcome::FellBackToSolve`: the
+plain `repair` would otherwise present a fresh plan as if it were a repair.

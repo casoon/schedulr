@@ -688,6 +688,23 @@ pub struct Conflict {
     pub message: String,
 }
 
+/// The full verdict on one [`Solution`], obtained without mutating it (plan 31, E0.1).
+///
+/// Unlike the single-move [`crate::MoveEvaluation`] this checks every activity of the solution at
+/// once. A partial solution is made explicit: every modeled activity without an assignment is
+/// reported as a blocking `Unassigned` conflict, and an assignment naming an activity the problem
+/// no longer contains is reported as a blocking `ActivityDomain` conflict — never a panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolutionCheck {
+    pub is_feasible: bool,
+    pub hard_violations: Vec<Conflict>,
+    pub warnings: Vec<Conflict>,
+    /// The absolute score of the checked solution (not a delta).
+    pub score: Score,
+    pub score_components: Vec<ScoreComponent>,
+    pub explanations: Vec<String>,
+}
+
 /// Exact single-activity change checked against a [`crate::SchedulingState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedActivity {
@@ -858,6 +875,13 @@ pub enum ActivityRelation {
     Consecutive,
     /// `first` ends at least `min_gap` time units before `second` starts (Precedence).
     Precedence { min_gap: i64 },
+    /// `second` starts exactly `offset` time units after `first` starts:
+    /// `second.start = first.start + offset`. A negative `offset` places `second` before `first`.
+    ///
+    /// Generalises [`Self::SameStart`] (which is `FixedOffset { offset: 0 }`) to a fixed, non-zero
+    /// time lag between two activities — the primitive a caller needs to tie copies of a recurring
+    /// pattern to their shifted positions.
+    FixedOffset { offset: i64 },
 }
 
 /// Ties two activities together with an [`ActivityRelation`]. Unlike [`ScoreRule`], this is a
@@ -877,6 +901,26 @@ impl ActivityRelationConstraint {
             relation,
         }
     }
+}
+
+/// Blueprint for expanding one template [`Activity`] into several instances that repeat every
+/// `step` time units, each on the same relative position (plan 28, "Engine (`schedulr`, generisch)").
+///
+/// The caller names the instances: `instances` is a list of `(k, id)` pairs where `k` is the
+/// instance index — **not** the position in the vector — and `id` the [`ActivityId`] the instance
+/// must be reported under. Ordering is irrelevant; the instance index is what carries meaning.
+///
+/// The template itself is only a plan and is **not** added as an activity by
+/// [`SchedulingProblem::with_recurring_activity`]; the caller supplies an instance for every index
+/// it wants, including any index whose window coincides with the template's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recurrence {
+    /// Distance between two consecutive instances, in time units. Negative steps shift the
+    /// higher-indexed instances *before* the lower-indexed ones.
+    pub step: i64,
+    /// `(k, id)` pairs: instance `k` is placed under `id` with the template's window shifted by
+    /// `k * step`.
+    pub instances: Vec<(u32, ActivityId)>,
 }
 
 /// Hard cap on the total occupied duration one entity may accumulate inside a single period
@@ -968,6 +1012,25 @@ pub fn bucket_windows(
         }
     }
     ranges
+}
+
+/// All activities in the group choose the **same** participant for their candidate requirement
+/// (plan 33.1).
+///
+/// This is the engine primitive behind "one teacher per course": a course expanded into several
+/// activities (its terms, and one instance per cycle week) must not be split across different
+/// teachers. The group is domain-neutral — it only names activities whose participant
+/// requirements are compiled to satisfy the equality per candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantChoiceGroup {
+    /// The activities whose participant selection must agree.
+    pub activities: Vec<ActivityId>,
+}
+
+impl ParticipantChoiceGroup {
+    pub fn new(activities: Vec<ActivityId>) -> Self {
+        Self { activities }
+    }
 }
 
 /// Allowed shapes of a group of activities' teaching blocks, expressed over the schedule's own
@@ -1223,6 +1286,8 @@ pub struct SchedulingProblem {
     pub minimum_breaks: Vec<MinimumBreak>,
     /// Allowed block shapes for groups of activities (plan 25, C1).
     pub bucket_load_patterns: Vec<BucketLoadPattern>,
+    /// Groups whose activities must select the same participant (plan 33.1).
+    pub participant_choice_groups: Vec<ParticipantChoiceGroup>,
     pub soft_goals: Vec<SoftGoal>,
     /// How a collision between two activities of the same participant is reported (plan 26, §1).
     pub participant_conflict_policy: ParticipantConflictPolicy,
@@ -1249,6 +1314,7 @@ impl SchedulingProblem {
             maximum_daily_loads: Vec::new(),
             minimum_breaks: Vec::new(),
             bucket_load_patterns: Vec::new(),
+            participant_choice_groups: Vec::new(),
             soft_goals: Vec::new(),
             participant_conflict_policy: ParticipantConflictPolicy::default(),
         }
@@ -1306,6 +1372,62 @@ impl SchedulingProblem {
         self
     }
 
+    /// Expands one template [`Activity`] into the instances named by `recurrence`, shifting the
+    /// template's window by `k * step` for instance index `k` (plan 28).
+    ///
+    /// The template is a **blueprint only** and is not added to the problem — every activity the
+    /// caller wants must appear in [`Recurrence::instances`] under the id it should be reported
+    /// with. That keeps the caller in full control of naming and lets an index `k = 0` coincide
+    /// with the template's own window without producing a duplicate.
+    ///
+    /// Each instance keeps the template's duration and its whole requirement set (resource and
+    /// participant requirements, participant groups); only the time window moves. Shifting uses
+    /// saturating arithmetic, so an unusually large `step` cannot wrap.
+    ///
+    /// The instances are tied together by [`ActivityRelation::FixedOffset`] relations in a **star**
+    /// around the first entry of `instances`: every other instance is linked directly to that
+    /// anchor with the exact total offset `(k - k_anchor) * step`. A chain (`k` to `k+1`) would need
+    /// only `step` per link but lets the individual offsets add up, so a single wrong link — or a
+    /// caller tweaking one relation — shifts everything downstream; in a star each instance's
+    /// position is pinned by one independent equation, and one link is enough for the solver's
+    /// bounds propagation to move the whole group. The anchor is the *first list entry*, not
+    /// necessarily index `0`, so a caller may order the vector however it likes.
+    pub fn with_recurring_activity(mut self, template: Activity, recurrence: Recurrence) -> Self {
+        let mut anchor: Option<(i64, ActivityId)> = None;
+        for &(k, id) in &recurrence.instances {
+            let shift = i64::from(k).saturating_mul(recurrence.step);
+            let window = template.allowed_window;
+            self.activities.push(Activity {
+                id,
+                name: template.name.clone(),
+                allowed_window: TimeWindow::new(
+                    window.start.saturating_add(shift),
+                    window.end.saturating_add(shift),
+                ),
+                duration: template.duration,
+                participants: template.participants.clone(),
+                participant_groups: template.participant_groups.clone(),
+                participant_requirements: template.participant_requirements.clone(),
+                requirements: template.requirements.clone(),
+            });
+            match anchor {
+                None => anchor = Some((i64::from(k), id)),
+                Some((anchor_k, anchor_id)) => {
+                    self.relations.push(ActivityRelationConstraint::new(
+                        anchor_id,
+                        id,
+                        ActivityRelation::FixedOffset {
+                            offset: i64::from(k)
+                                .saturating_sub(anchor_k)
+                                .saturating_mul(recurrence.step),
+                        },
+                    ));
+                }
+            }
+        }
+        self
+    }
+
     /// Adds a per-entity cap on the occupied duration within each period bucket.
     pub fn with_maximum_daily_load(mut self, load: MaximumDailyLoad) -> Self {
         self.maximum_daily_loads.push(load);
@@ -1325,6 +1447,12 @@ impl SchedulingProblem {
     /// allowed shape) is ignored rather than rejected — see [`BucketLoadPattern::is_active`].
     pub fn with_bucket_load_pattern(mut self, pattern: BucketLoadPattern) -> Self {
         self.bucket_load_patterns.push(pattern);
+        self
+    }
+
+    /// Adds a group whose activities must all select the same participant (plan 33.1).
+    pub fn with_participant_choice_group(mut self, group: ParticipantChoiceGroup) -> Self {
+        self.participant_choice_groups.push(group);
         self
     }
 
