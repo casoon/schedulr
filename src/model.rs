@@ -1502,8 +1502,9 @@ pub enum SolveStatus {
 }
 
 /// Why a solve run stopped without reaching a conclusive result — mirrors
-/// `unifier::solver::AbortReason`, kept as a distinct type here so callers never need to
-/// depend on `unifier` directly.
+/// `unifier::solver::AbortReason` (except for [`AbortReason::RejectedSolution`], which this
+/// crate decides on its own), kept as a distinct type here so callers never need to depend on
+/// `unifier` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbortReason {
     /// The caller's [`crate::CancellationToken`] was cancelled.
@@ -1515,6 +1516,13 @@ pub enum AbortReason {
     /// A local-search-style solver reached a local optimum with no improving move
     /// available. This does not prove infeasibility or optimality.
     LocalOptimum,
+    /// The search returned an assignment violating hard constraints, so it was withheld instead
+    /// of being handed on as a schedule.
+    ///
+    /// This says something about the search, not about the problem: it is no evidence that a
+    /// valid schedule does or does not exist. It is reported rather than swallowed because a
+    /// schedule that quietly breaks the rules it was given is worse than no schedule at all.
+    RejectedSolution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -18,8 +18,9 @@ use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
 use unifier::score::{Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel};
 pub use unifier::solver::CancellationToken;
 use unifier::solver::{
-    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, SearchStatistics,
-    SharedIncumbent, SolveOutcome, SolveStatus as UnifierSolveStatus, SolverOptions,
+    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, ParallelSolver,
+    SearchStatistics, SharedIncumbent, SolveOutcome, SolveStatus as UnifierSolveStatus,
+    SolverOptions,
 };
 use unifier::{ForbiddenValues, ModelBuilder, VariableId};
 
@@ -33,6 +34,8 @@ pub struct SolveOptions {
     pub time_limit: Option<Duration>,
     /// Handle a caller can use to interrupt the search from another thread/task.
     pub cancellation_token: Option<CancellationToken>,
+    /// How to spend the budget. See [`SolveStrategy`].
+    pub strategy: SolveStrategy,
 }
 
 impl Default for SolveOptions {
@@ -40,8 +43,41 @@ impl Default for SolveOptions {
         Self {
             time_limit: Some(Duration::from_secs(10)),
             cancellation_token: None,
+            strategy: SolveStrategy::default(),
         }
     }
+}
+
+/// How [`CompiledProblem::solve_with`] spends its budget.
+///
+/// All of these end at the same guard: a schedule that violates hard constraints is never
+/// returned, whichever strategy produced it (see [`InternalCompiled::solve_result`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolveStrategy {
+    /// Construct a feasible schedule, then improve it with Branch & Bound.
+    ///
+    /// Two phases so that finding *a* schedule and finding a *good* one stay separate questions:
+    /// the optimizer starts bounded by a schedule that already exists instead of searching for
+    /// its first complete assignment on the clock.
+    ConstructThenOptimize,
+    /// Construct a feasible schedule, then hand it to the four-worker portfolio (Backtracking,
+    /// Local Search, LNS, Branch & Bound over a shared incumbent) for the remaining budget.
+    ///
+    /// The default, because a tree search alone plateaus where a repair-based one does not: on
+    /// the reference instances this both reached schedules [`Self::ConstructThenOptimize`] never
+    /// found in the same budget and roughly tripled the quality of the ones it did find. It
+    /// costs four threads and four copies of the model.
+    ///
+    /// Which of several equally good schedules comes back depends on how the workers happen to
+    /// be scheduled, so two runs over the same problem can return different arrangements of the
+    /// same quality. Pick [`Self::ConstructThenOptimize`] where a run has to be repeatable.
+    #[default]
+    ConstructThenPortfolio,
+    /// One Branch & Bound run over the whole budget, with no construction phase.
+    ///
+    /// The shape the search had before construction was split out, kept so a benchmark can say
+    /// what the split is worth rather than assuming it.
+    OptimizeOnly,
 }
 
 /// Divides the run's time limit into the share [`CompiledProblem::search`] gives its
@@ -155,6 +191,10 @@ impl CompiledProblem {
             return BacktrackingSolver::new()
                 .solve(graph, &solver_options(options.time_limit, options));
         }
+        if options.strategy == SolveStrategy::OptimizeOnly {
+            return BranchAndBoundSolver::new()
+                .solve(graph, &solver_options(options.time_limit, options));
+        }
 
         let construction_limit = options
             .time_limit
@@ -181,7 +221,12 @@ impl CompiledProblem {
             optimizer_options.shared_incumbent = Some(incumbent);
         }
 
-        let optimized = BranchAndBoundSolver::new().solve(graph, &optimizer_options);
+        let optimized = match options.strategy {
+            SolveStrategy::ConstructThenPortfolio => {
+                ParallelSolver::new().solve(graph, &optimizer_options)
+            }
+            _ => BranchAndBoundSolver::new().solve(graph, &optimizer_options),
+        };
         let optimizer_statistics = optimized.statistics;
         let mut outcome = if optimized.solution.is_some() {
             optimized
@@ -942,8 +987,16 @@ impl InternalCompiled {
             .collect()
     }
 
+    /// Turns a search outcome into a [`SolveResult`] — and refuses to pass on a schedule that
+    /// does not hold this crate's own hard constraints.
+    ///
+    /// The search reports what it believes about the assignment it returns, and that belief has
+    /// been wrong: a portfolio once reported success on a schedule breaking 83 hard rules,
+    /// because each layer trusted the one below it. This crate owns the model, so it is the one
+    /// that has to look, and it looks on every run — one pass over the constraints, against a
+    /// search that just spent seconds over millions of nodes.
     pub(crate) fn solve_result(&self, outcome: SolveOutcome) -> SolveResult {
-        let statistics = SolveStatistics {
+        let mut statistics = SolveStatistics {
             nodes_expanded: outcome.statistics.nodes_expanded,
             elapsed_millis: outcome.statistics.elapsed.as_millis(),
             optimal: matches!(outcome.status, UnifierSolveStatus::Optimal),
@@ -953,14 +1006,45 @@ impl InternalCompiled {
             UnifierSolveStatus::Infeasible => SolveStatus::Infeasible,
             UnifierSolveStatus::Aborted(reason) => SolveStatus::Aborted(abort_reason(reason)),
         };
+        if let Some(solution) = &outcome.solution
+            && !self.holds_hard_constraints(&solution.assignment)
+        {
+            // Whatever the search claimed about this assignment, it is not a schedule. Nothing
+            // is known about the problem itself either, so neither `Feasible` nor `Infeasible`
+            // would be honest, and an optimum that violates the rules is not an optimum.
+            statistics.optimal = false;
+            return SolveResult {
+                status: SolveStatus::Aborted(AbortReason::RejectedSolution),
+                solution: None,
+                statistics,
+            };
+        }
         let solution = outcome
             .solution
             .map(|solution| self.public_solution(solution));
+
         SolveResult {
             status,
             solution,
             statistics,
         }
+    }
+
+    /// Whether `assignment` covers the model and breaks none of its hard constraints.
+    ///
+    /// Deliberately judged on the search's own assignment rather than on the [`Solution`] handed
+    /// to callers: that projection and [`Self::assignment_map`] do not round-trip for a
+    /// participant an activity both names directly and offers as a choice — the projection lists
+    /// them either way, and mapping back then reads a chosen candidate where the search left
+    /// none. Checking the projection would reject perfectly good schedules over that.
+    fn holds_hard_constraints(&self, assignment: &UnifierAssignment) -> bool {
+        self.graph
+            .variables()
+            .keys()
+            .all(|variable| assignment.contains_key(variable))
+            && ScoreCalculator
+                .calculate_score(&self.graph, assignment)
+                .is_feasible()
     }
 
     fn public_solution(&self, solution: unifier::Solution) -> Solution {
@@ -2572,4 +2656,106 @@ fn participant_is_assigned(
             .get(&activity.id())
             .is_some_and(|participants| participants.contains(&participant))
         || guaranteed_candidate(selected_participants.get(&activity.id()), participant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guard in [`InternalCompiled::solve_result`]: an assignment that breaks a hard
+    /// constraint must not be handed on as a schedule, whatever the search claims about it.
+    ///
+    /// The problem itself is satisfiable — two four-unit activities fit one after the other in a
+    /// ten-unit window — so a rejection here can only come from the returned assignment, not from
+    /// the model.
+    #[test]
+    fn an_assignment_violating_hard_constraints_is_withheld() {
+        let room = Resource::new(ResourceId(1), "Room", 1);
+        let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 10), 4)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 10), 4)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let compiled = compile(&SchedulingProblem::new(
+            vec![room],
+            vec![],
+            vec![first, second],
+        ))
+        .expect("problem compiles");
+
+        // Both activities start at 0, so both hold the one unary resource at once. No real search
+        // returns this; a broken portfolio did, on 83 rules at a time, and reported success.
+        let mut assignment: HashMap<VariableId, i64> = HashMap::new();
+        for &(start, end) in compiled.internal.variables.values() {
+            assignment.insert(start, 0);
+            assignment.insert(end, 4);
+        }
+        let claimed = unifier::Solution {
+            assignment,
+            score: unifier::HardSoftScore::feasible(0),
+        };
+
+        // Pin down what makes this assignment invalid, so the rejection below cannot pass for
+        // some unrelated reason.
+        let check = compiled
+            .internal
+            .check(&compiled.internal.public_solution(claimed.clone()));
+        assert!(
+            check
+                .hard_violations
+                .iter()
+                .any(|conflict| conflict.constraint_name == "NoOverlap"),
+            "expected the double-booked resource to show up, got {:?}",
+            check.hard_violations
+        );
+        assert!(
+            !compiled
+                .internal
+                .holds_hard_constraints(&claimed.assignment),
+            "and the guard has to see it on the search's own assignment, which is what it reads"
+        );
+
+        let outcome = SolveOutcome {
+            status: UnifierSolveStatus::Feasible,
+            solution: Some(claimed),
+            statistics: SearchStatistics::default(),
+            bound: None,
+        };
+
+        let result = compiled.internal.solve_result(outcome);
+
+        assert_eq!(
+            result.status,
+            SolveStatus::Aborted(AbortReason::RejectedSolution)
+        );
+        assert!(
+            result.solution.is_none(),
+            "an assignment that breaks the rules must not leave as a schedule"
+        );
+        assert!(
+            !result.statistics.optimal,
+            "an optimum that violates hard constraints is not an optimum"
+        );
+    }
+
+    /// The guard stays out of the way of a schedule that does hold: same problem, an arrangement
+    /// that actually works, passed through untouched.
+    #[test]
+    fn a_valid_assignment_passes_the_guard() {
+        let room = Resource::new(ResourceId(1), "Room", 1);
+        let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 10), 4)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 10), 4)
+            .with_requirement(ResourceRequirement::new(room.id(), 1));
+        let compiled = compile(&SchedulingProblem::new(
+            vec![room],
+            vec![],
+            vec![first, second],
+        ))
+        .expect("problem compiles");
+
+        let result = compiled.solve();
+
+        assert_eq!(result.status, SolveStatus::Feasible);
+        assert!(result.solution.is_some());
+    }
 }

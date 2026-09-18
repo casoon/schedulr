@@ -6,7 +6,7 @@ mod model;
 mod repair;
 mod state;
 
-pub use batch::{CancellationToken, CompiledProblem, SolveOptions, compile};
+pub use batch::{CancellationToken, CompiledProblem, SolveOptions, SolveStrategy, compile};
 pub use explain::{
     Analysis, AssignmentChange, Bottleneck, ChangeAspects, ChangeEvaluation, ChangeRequest,
     MoveEvaluation, SolutionComparison, Suggestion, compare,

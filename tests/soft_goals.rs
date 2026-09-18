@@ -230,12 +230,21 @@ fn minimize_group_idle_aggregates_members_and_moves_the_solver() {
         SoftGoalKind::MinimizeGroupIdle,
     ));
     let grouped = compile(&grouped).unwrap().solve().solution.unwrap();
-    assert_eq!(
-        start_of(&grouped, ActivityId(2)),
-        4,
-        "the group goal must move the free member next to the other member's assignment"
+    // Any start leaving the group's *combined* occupancy without a gap is an optimum here: 4
+    // (directly before the pinned assignment) and 5 (alongside it) both are. Which one comes
+    // back depends on the search, so asserting one of them would assert the search rather than
+    // the goal. What the goal owes is that it closed the gap and pulled the free member off the
+    // earliest start the per-participant variant above settles for.
+    let start = start_of(&grouped, ActivityId(2));
+    assert!(
+        start > 0,
+        "the group goal must pull the free member towards the other member, got start {start}"
     );
-    assert_eq!(component(&grouped, category).value, 0);
+    assert_eq!(
+        component(&grouped, category).value,
+        0,
+        "and it must close the group's gap entirely"
+    );
 }
 
 /// `RoomStability`: occurrences sharing an activity name prefer the same resource.
