@@ -2719,6 +2719,7 @@ mod tests {
             solution: Some(claimed),
             statistics: SearchStatistics::default(),
             bound: None,
+            best_effort: None,
         };
 
         let result = compiled.internal.solve_result(outcome);
