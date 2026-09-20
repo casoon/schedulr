@@ -1925,8 +1925,116 @@ impl Constraint for SelectedResourceCapacity {
         })
     }
 
-    fn propagate(&self, _domains: &mut TrailedDomains) -> PropagationResult {
+    /// Reports the overload that is already certain, instead of leaving every one of them to
+    /// the leaf check.
+    ///
+    /// This used to return `Success` unconditionally — the constraint could not fail a search
+    /// node, only a complete assignment. That is what made a step needing two instances of one
+    /// resource type pathological: the two requirement slots are two tasks on the *same* start
+    /// variable, the search fixes their presences near the root, and if both land on the same
+    /// capacity-1 instance, nothing says so until every start time underneath has been tried
+    /// (plan/19 in the Avilo repository measured 1,116,987 nodes for a problem with a single
+    /// activity, two resources and a ten-hour window).
+    ///
+    /// The rule reports only what holds regardless of time: **tasks sharing a start variable
+    /// belong to one activity and therefore always overlap**, so their demands can be added up
+    /// without knowing when that activity runs. Zero-duration tasks are left out — they occupy
+    /// no interval, and [`Self::overloaded`] does not count them either, because their end
+    /// event cancels their start event at the same instant.
+    ///
+    /// Deliberately no second rule for "everything in scope is decided, so run the full
+    /// overload check here": that costs a pass over the whole scope on every propagation, and
+    /// a busy resource's scope is every activity that may use it. Measured on
+    /// `tests/solver_scale.rs`, it cost the tree search its 24-activity instance inside the
+    /// five-second budget — a check that arrives one node earlier is not worth slowing every
+    /// node down. The leaf check already covers that case.
+    ///
+    /// # Complexity
+    /// Time: O(T^2) worst case over this resource's tasks T, but T is the number of tasks that
+    /// may use *one* resource and the inner scan stops at the first group hit; no allocation.
+    fn propagate(&self, domains: &mut TrailedDomains) -> PropagationResult {
+        let mut demand_per_start: Vec<(VariableId, i64)> = Vec::new();
+        for task in &self.tasks {
+            if task.duration <= 0 {
+                continue;
+            }
+            let surely_present = match task.presence {
+                None => true,
+                Some(presence) => domains
+                    .get(&presence)
+                    .is_some_and(|domain| domain.len() == 1 && domain.min() == Some(1)),
+            };
+            if !surely_present {
+                continue;
+            }
+            let demand = i64::from(task.demand);
+            match demand_per_start
+                .iter_mut()
+                .find(|(start, _)| *start == task.start)
+            {
+                Some((_, total)) => {
+                    *total += demand;
+                    if *total > i64::from(self.capacity) {
+                        return PropagationResult::Conflict;
+                    }
+                }
+                None => {
+                    if demand > i64::from(self.capacity) {
+                        return PropagationResult::Conflict;
+                    }
+                    demand_per_start.push((task.start, demand));
+                }
+            }
+        }
         PropagationResult::Success { changed: false }
+    }
+
+    /// Mirrors [`Self::propagate`]'s rule so the bound Branch & Bound derives from
+    /// `optimistic_score` sees the same certain overload. The trait default would fall back to
+    /// [`Self::is_satisfied`], which reads only the assignment and therefore answers "not
+    /// violated yet" for exactly the case this constraint can already rule out.
+    fn is_satisfiable(
+        &self,
+        domains: &HashMap<VariableId, Domain>,
+        assignment: &HashMap<VariableId, i64>,
+    ) -> bool {
+        let mut demand_per_start: Vec<(VariableId, i64)> = Vec::new();
+        for task in &self.tasks {
+            if task.duration <= 0 {
+                continue;
+            }
+            let surely_present = match task.presence {
+                None => true,
+                Some(presence) => {
+                    assignment.get(&presence) == Some(&1)
+                        || domains
+                            .get(&presence)
+                            .is_some_and(|domain| domain.len() == 1 && domain.min() == Some(1))
+                }
+            };
+            if !surely_present {
+                continue;
+            }
+            let demand = i64::from(task.demand);
+            match demand_per_start
+                .iter_mut()
+                .find(|(start, _)| *start == task.start)
+            {
+                Some((_, total)) => {
+                    *total += demand;
+                    if *total > i64::from(self.capacity) {
+                        return false;
+                    }
+                }
+                None => {
+                    if demand > i64::from(self.capacity) {
+                        return false;
+                    }
+                    demand_per_start.push((task.start, demand));
+                }
+            }
+        }
+        self.is_satisfied(assignment)
     }
 }
 

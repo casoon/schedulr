@@ -204,3 +204,80 @@ fn the_tree_search_still_finds_the_small_instance_in_few_nodes() {
         result.statistics.nodes_expanded
     );
 }
+
+/// How much tree the two-instances-of-one-type shape needs. Measured at 7 nodes; the ceiling
+/// sits far above it because the number that matters here is the *order of magnitude*: before
+/// `SelectedResourceCapacity` propagated, this exact instance walked 1,116,987 nodes and only
+/// squeezed past the default budget by luck of the machine.
+const SIBLING_NODE_CEILING: u64 = 500;
+
+/// One activity needing two distinct instances of the same resource type, in a day-long window.
+///
+/// This is the shape a treatment step with `required_resource_count = 2` produces (Avilo,
+/// `plan/19`), and it was pathological for a reason worth guarding: the two requirement slots
+/// are two tasks on the *same* start variable, so the search fixes their presences near the
+/// root — and when both landed on the same capacity-1 instance, nothing said so until every one
+/// of the 34,200 start times below had been tried. The overload is independent of *when* the
+/// activity runs, and `SelectedResourceCapacity::propagate` now says so at the node that causes
+/// it.
+///
+/// A node count rather than a duration, for the reason the module docs give: it cannot flake on
+/// a busy machine. And it is the guard that would have caught this, where the instances above
+/// did not — their activities each hold a single requirement, so no two of their tasks ever
+/// share a start variable.
+#[test]
+fn an_activity_needing_two_instances_of_one_type_stays_cheap() {
+    let problem = SchedulingProblem::new(
+        vec![
+            Resource::new(ResourceId(1), "device-a", 1).with_type("device"),
+            Resource::new(ResourceId(2), "device-b", 1).with_type("device"),
+        ],
+        Vec::new(),
+        vec![
+            Activity::new(ActivityId(1), "step", TimeWindow::new(0, 36_000), 1_800)
+                .with_requirement(ResourceRequirement::matching("device", 1))
+                .with_requirement(ResourceRequirement::matching("device", 1)),
+        ],
+    );
+
+    let compiled = compile(&problem).expect("the instance compiles");
+    let result = compiled.solve_with(&SolveOptions {
+        time_limit: Some(Duration::from_secs(5)),
+        strategy: SolveStrategy::ConstructThenOptimize,
+        ..SolveOptions::default()
+    });
+
+    let solution = result
+        .solution
+        .as_ref()
+        .expect("two capacity-1 instances satisfy two single-unit requirements");
+
+    // No `compiled.check(solution)` here, unlike the guard above, and not by oversight:
+    // `check` maps the public `Solution` back onto the model's variables, and that projection
+    // does not round-trip for an activity whose *two* requirements draw from one pool — it
+    // lists both chosen resources for the activity without saying which requirement took
+    // which, so mapping back marks both presences for both slots and the check reports four
+    // conflicts on a schedule that is correct. Reproduced on this instance against master
+    // before this change, so it is a separate defect in the projection, not something the
+    // propagation rule below introduced or has to carry. The assertions here therefore look at
+    // the assignment itself, which is unambiguous.
+    let assignment = solution
+        .assignments
+        .first()
+        .expect("the one activity is assigned");
+    assert_eq!(
+        assignment.resources.len(),
+        2,
+        "both requirements are resolved"
+    );
+    assert_ne!(
+        assignment.resources[0], assignment.resources[1],
+        "a capacity-1 instance cannot serve both requirements, so the two must differ"
+    );
+    assert!(
+        result.statistics.nodes_expanded <= SIBLING_NODE_CEILING,
+        "the search needed {} nodes where {SIBLING_NODE_CEILING} is the ceiling — the certain \
+         overload between two tasks on one start variable is going undetected again",
+        result.statistics.nodes_expanded
+    );
+}
