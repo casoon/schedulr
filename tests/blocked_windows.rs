@@ -1,8 +1,12 @@
 //! A blocked window forbids **occupying** it, not just starting inside it (plan 26, §2).
 //!
-//! `with_unavailable_range` keeps its start semantics — a range that a long activity may start
-//! before. `with_blocked_window` is the timetable reading: "this person/room is not bookable in
-//! these hours", whatever the lesson's length.
+//! `Participant`/`Resource::with_unavailable_range` keeps its start semantics — a range that a
+//! long activity may start before. `with_blocked_window` is the timetable reading: "this
+//! person/room is not bookable in these hours", whatever the lesson's length.
+//!
+//! `ScheduleTemplate::with_unavailable_range` is the third case and reads like the second: a
+//! closure of the calendar itself takes the slots away from everyone, so an activity may not
+//! reach into it either.
 
 use schedulr::{
     Activity, ActivityId, Assignment, ChangeRequest, CompiledProblem, Participant, ParticipantId,
@@ -182,4 +186,64 @@ fn the_start_semantics_of_an_unavailable_range_are_unchanged() {
 
     assert!(!moved(3), "der Start liegt in der Sperre");
     assert!(moved(2), "ragt in die Sperre hinein, darf aber starten");
+}
+
+/// A closure of the calendar is occupancy-aware: a double lesson may not *reach into* it.
+///
+/// The underlying `PeriodicValues` forbids start values, so the compiler widens the range by the
+/// activity's duration. Without that, "the 4th hour is closed" would still allow a two-hour
+/// lesson beginning in the 3rd — the single most obvious way for a closure to be wrong.
+#[test]
+fn a_closed_range_in_the_calendar_cannot_be_reached_into() {
+    use schedulr::{AcademicPeriod, DayTemplate, ScheduleTemplate, SlotTemplate};
+
+    let may_start_at = |duration: u64, start: i64| {
+        let mut day = DayTemplate::new(0);
+        for period in 0..6 {
+            day = day.with_slot(SlotTemplate::new(
+                format!("{}. Stunde", period + 1),
+                period,
+                (6 - period) as u64,
+            ));
+        }
+        // Die 4. Stunde (Slot 3) ist geschlossen.
+        let template = ScheduleTemplate::new(6)
+            .with_day(day)
+            .with_unavailable_range(3, 3);
+        let problem = SchedulingProblem::new(
+            vec![],
+            vec![Participant::new(ParticipantId(1), "Ben")],
+            vec![
+                Activity::new(ActivityId(1), "Mathematik", TimeWindow::new(0, 6), duration)
+                    .with_participant(ParticipantId(1)),
+            ],
+        )
+        .with_calendar(
+            AcademicPeriod {
+                window: TimeWindow::new(0, 6),
+            },
+            template,
+        );
+        compile(&problem)
+            .expect("a valid problem")
+            .evaluate_changes(
+                &placed_at(0, duration),
+                &[ChangeRequest::Move {
+                    activity: ActivityId(1),
+                    window: TimeWindow::new(start, start + duration as i64),
+                }],
+            )
+            .is_feasible
+    };
+
+    // Eine Einzelstunde: nur der geschlossene Slot selbst fällt weg.
+    assert!(may_start_at(1, 2), "die 3. Stunde bleibt frei");
+    assert!(!may_start_at(1, 3), "die 4. Stunde ist geschlossen");
+    assert!(may_start_at(1, 4), "die 5. Stunde bleibt frei");
+
+    // Eine Doppelstunde: auch der Beginn davor fällt weg, weil sie hineinreichen würde.
+    assert!(may_start_at(2, 1), "1.–2. Stunde bleibt möglich");
+    assert!(!may_start_at(2, 2), "3.–4. Stunde reicht in die Sperre");
+    assert!(!may_start_at(2, 3), "4.–5. Stunde beginnt in der Sperre");
+    assert!(may_start_at(2, 4), "5.–6. Stunde bleibt möglich");
 }

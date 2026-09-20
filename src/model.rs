@@ -791,6 +791,13 @@ impl ScheduleTemplate {
         self
     }
 
+    /// Marks `[start, end]` (inclusive) as a range of the cycle **no activity may occupy**.
+    ///
+    /// Duration-aware, unlike the same-named method on [`Resource`]: an activity that merely
+    /// reaches into the range is refused as well, whatever its length. That is what a calendar
+    /// closure means — the slots are gone for everyone, not just as starting points.
+    ///
+    /// The range repeats every [`Self::cycle_length`], like the rest of the template.
     pub fn with_unavailable_range(mut self, start: i64, end: i64) -> Self {
         self.unavailable_ranges.push((start, end));
         self

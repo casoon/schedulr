@@ -6,7 +6,7 @@ use crate::model::{
     SoftGoalKind, Solution, SolutionCheck, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
     bucket_windows,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use unifier::constraint::{
@@ -122,6 +122,12 @@ pub(crate) struct InternalCompiled {
     fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
     selected_capacity_constraints: Vec<(ConstraintId, Arc<SelectedResourceCapacity>)>,
     constraint_entities: HashMap<ConstraintId, EntityRef>,
+    /// Die Constraints, die eine **Verfügbarkeit** durchsetzen (Kalendersperren), nicht eine
+    /// Kollision. Sie gehören einer Person oder einer Ressource und tragen deshalb deren Namen —
+    /// ihre Schwere folgt aber nicht der Kollisionspolitik: dass zwei Stunden derselben Person
+    /// kollidieren, darf eine Schule als Hinweis werten; dass eine Stunde in einer Zeit liegt, in
+    /// der es diese Person nicht gibt, nicht.
+    calendar_constraints: HashSet<ConstraintId>,
     /// Resolved from [`SchedulingProblem::participant_conflict_policy`] once, at compile time.
     participant_conflict_severity: ConflictSeverity,
     resource_names: BTreeMap<ResourceId, String>,
@@ -359,6 +365,10 @@ fn build_problem_internal(
     let mut flexible_participant_requirements = Vec::new();
     let mut fixed_resources: BTreeMap<ActivityId, Vec<ResourceId>> = BTreeMap::new();
     let mut fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>> = BTreeMap::new();
+    // Wem eine Kalendersperre gehört. Ohne diese Zuordnung meldet ein verletzter Kalender nur
+    // "ForbiddenValues constraint is violated" — wahr und unbrauchbar. Die Map, die daraus die
+    // Namen zieht, entsteht erst nach dem Kompilieren, also wird hier gesammelt.
+    let mut calendar_entities: Vec<(ConstraintId, EntityRef)> = Vec::new();
 
     for activity in &expanded_activities {
         let duration = duration_as_i64(activity.duration());
@@ -381,7 +391,16 @@ fn build_problem_internal(
                 interval.start(),
                 template.cycle_length,
                 template.allowed_starts_for(activity.duration()),
-                template.unavailable_ranges.iter().copied(),
+                // Eine Sperre des Kalenders ist ein Fenster, das **niemand belegen darf** — nicht
+                // bloß eines, in dem nichts beginnen darf. `PeriodicValues` verbietet Startwerte,
+                // also wird die Sperre um die Dauer nach vorn verbreitert: eine Aktivität der
+                // Länge d, die bei s beginnt, belegt [s, s+d) und trifft die geschlossene Sperre
+                // [a, b] genau dann, wenn s >= a - d + 1 und s <= b. Ohne das liefe eine
+                // Doppelstunde, die davor beginnt, mitten hinein.
+                template
+                    .unavailable_ranges
+                    .iter()
+                    .map(|&(start, end)| (start.saturating_sub(duration - 1), end)),
             );
             if window.start < period.window.start || window.end > period.window.end {
                 errors.push(format!(
@@ -398,7 +417,16 @@ fn build_problem_internal(
             if candidates.len() == 1 && requirement.exact_resource().is_some() {
                 let resource = candidates[0];
                 compiled.require_resource(resource_map[&resource], requirement.units());
-                apply_resource_calendar(&mut builder, problem, interval_start, resource, duration);
+                calendar_entities.extend(
+                    apply_resource_calendar(
+                        &mut builder,
+                        problem,
+                        interval_start,
+                        resource,
+                        duration,
+                    )
+                    .map(|constraint| (constraint, EntityRef::Resource(resource))),
+                );
                 fixed_resources
                     .entry(activity.id())
                     .or_default()
@@ -409,12 +437,15 @@ fn build_problem_internal(
         }
         for &participant in activity.participants() {
             compiled.require_resource(participant_map[&participant], 1);
-            apply_participant_calendar(
-                &mut builder,
-                problem,
-                interval_start,
-                participant,
-                duration,
+            calendar_entities.extend(
+                apply_participant_calendar(
+                    &mut builder,
+                    problem,
+                    interval_start,
+                    participant,
+                    duration,
+                )
+                .map(|constraint| (constraint, EntityRef::Participant(participant))),
             );
         }
         for requirement in activity.participant_requirements() {
@@ -422,12 +453,15 @@ fn build_problem_internal(
             if candidates.len() == 1 && requirement.exact_participant().is_some() {
                 let participant = candidates[0];
                 compiled.require_resource(participant_map[&participant], 1);
-                apply_participant_calendar(
-                    &mut builder,
-                    problem,
-                    interval_start,
-                    participant,
-                    duration,
+                calendar_entities.extend(
+                    apply_participant_calendar(
+                        &mut builder,
+                        problem,
+                        interval_start,
+                        participant,
+                        duration,
+                    )
+                    .map(|constraint| (constraint, EntityRef::Participant(participant))),
                 );
                 fixed_participants
                     .entry(activity.id())
@@ -553,13 +587,16 @@ fn build_problem_internal(
         );
         for (&resource, &presence) in candidates.iter().zip(&presences) {
             let interval = compiled_by_activity[&activity_id].interval();
-            apply_optional_resource_calendar(
-                &mut builder,
-                problem,
-                interval.start(),
-                resource,
-                presence,
-                duration_as_i64(duration_of(&expanded_activities, activity_id)),
+            calendar_entities.extend(
+                apply_optional_resource_calendar(
+                    &mut builder,
+                    problem,
+                    interval.start(),
+                    resource,
+                    presence,
+                    duration_as_i64(duration_of(&expanded_activities, activity_id)),
+                )
+                .map(|constraint| (constraint, EntityRef::Resource(resource))),
             );
             flexible_tasks
                 .entry(resource)
@@ -594,13 +631,16 @@ fn build_problem_internal(
                 .or_default()
                 .push((participant, presence));
             let interval = compiled_by_activity[&activity_id].interval();
-            apply_optional_participant_calendar(
-                &mut builder,
-                problem,
-                interval.start(),
-                participant,
-                presence,
-                duration_as_i64(duration_of(&expanded_activities, activity_id)),
+            calendar_entities.extend(
+                apply_optional_participant_calendar(
+                    &mut builder,
+                    problem,
+                    interval.start(),
+                    participant,
+                    presence,
+                    duration_as_i64(duration_of(&expanded_activities, activity_id)),
+                )
+                .map(|constraint| (constraint, EntityRef::Participant(participant))),
             );
             flexible_participant_tasks
                 .entry(participant)
@@ -677,6 +717,11 @@ fn build_problem_internal(
         .into_iter()
         .map(|(resource, constraint)| (constraint, resource_entities[&resource]))
         .collect();
+    let calendar_constraints: HashSet<ConstraintId> = calendar_entities
+        .iter()
+        .map(|(constraint, _)| *constraint)
+        .collect();
+    constraint_entities.extend(calendar_entities);
 
     let mut selected_capacity_constraints = Vec::new();
     for (resource, mut tasks) in flexible_tasks {
@@ -865,6 +910,7 @@ fn build_problem_internal(
         fixed_participants,
         selected_capacity_constraints,
         constraint_entities,
+        calendar_constraints,
         participant_conflict_severity: problem.participant_conflict_policy.severity(),
         resource_names: problem
             .resources
@@ -1168,9 +1214,16 @@ impl InternalCompiled {
                     .constraint_entities
                     .get(&violation.constraint_id)
                     .copied();
+                let is_calendar = self.calendar_constraints.contains(&violation.constraint_id);
                 let (severity, entity_name) = match entity {
                     Some(EntityRef::Participant(id)) => (
-                        self.participant_conflict_severity,
+                        // Eine verletzte Verfügbarkeit ist immer blockierend; nur eine Kollision
+                        // folgt der Politik des Aufrufers (siehe `calendar_constraints`).
+                        if is_calendar {
+                            ConflictSeverity::Blocking
+                        } else {
+                            self.participant_conflict_severity
+                        },
                         self.participant_names.get(&id).map(String::as_str),
                     ),
                     Some(EntityRef::Resource(id)) => (
@@ -1511,21 +1564,17 @@ fn apply_resource_calendar(
     start: VariableId,
     resource: ResourceId,
     duration: i64,
-) {
-    if let Some(found) = problem
+) -> Option<ConstraintId> {
+    let found = problem
         .resources
         .iter()
-        .find(|candidate| candidate.id() == resource)
-    {
-        let ranges = forbidden_start_ranges(
-            found.unavailable_ranges(),
-            found.blocked_windows(),
-            duration,
-        );
-        if !ranges.is_empty() {
-            builder.add_calendar(start, &ranges);
-        }
-    }
+        .find(|candidate| candidate.id() == resource)?;
+    let ranges = forbidden_start_ranges(
+        found.unavailable_ranges(),
+        found.blocked_windows(),
+        duration,
+    );
+    (!ranges.is_empty()).then(|| builder.add_calendar(start, &ranges))
 }
 
 /// Restricts `start` to avoid `participant`'s unavailable ranges (Availability), unconditionally —
@@ -1536,21 +1585,17 @@ fn apply_participant_calendar(
     start: VariableId,
     participant: ParticipantId,
     duration: i64,
-) {
-    if let Some(found) = problem
+) -> Option<ConstraintId> {
+    let found = problem
         .participants
         .iter()
-        .find(|candidate| candidate.id() == participant)
-    {
-        let ranges = forbidden_start_ranges(
-            found.unavailable_ranges(),
-            found.blocked_windows(),
-            duration,
-        );
-        if !ranges.is_empty() {
-            builder.add_calendar(start, &ranges);
-        }
-    }
+        .find(|candidate| candidate.id() == participant)?;
+    let ranges = forbidden_start_ranges(
+        found.unavailable_ranges(),
+        found.blocked_windows(),
+        duration,
+    );
+    (!ranges.is_empty()).then(|| builder.add_calendar(start, &ranges))
 }
 
 /// Restricts `start` to avoid `resource`'s unavailable ranges (AllowedTime), but only if
@@ -1562,24 +1607,22 @@ fn apply_optional_resource_calendar(
     resource: ResourceId,
     presence: VariableId,
     duration: i64,
-) {
-    if let Some(found) = problem
+) -> Option<ConstraintId> {
+    let found = problem
         .resources
         .iter()
-        .find(|candidate| candidate.id() == resource)
-    {
-        let ranges = forbidden_start_ranges(
-            found.unavailable_ranges(),
-            found.blocked_windows(),
-            duration,
-        );
-        if !ranges.is_empty() {
-            let forbidden = ranges
-                .iter()
-                .flat_map(|&(range_start, range_end)| range_start..=range_end);
-            builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence);
-        }
-    }
+        .find(|candidate| candidate.id() == resource)?;
+    let ranges = forbidden_start_ranges(
+        found.unavailable_ranges(),
+        found.blocked_windows(),
+        duration,
+    );
+    (!ranges.is_empty()).then(|| {
+        let forbidden = ranges
+            .iter()
+            .flat_map(|&(range_start, range_end)| range_start..=range_end);
+        builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence)
+    })
 }
 
 /// Restricts `start` to avoid `participant`'s unavailable ranges (Availability), but only if
@@ -1591,24 +1634,22 @@ fn apply_optional_participant_calendar(
     participant: ParticipantId,
     presence: VariableId,
     duration: i64,
-) {
-    if let Some(found) = problem
+) -> Option<ConstraintId> {
+    let found = problem
         .participants
         .iter()
-        .find(|candidate| candidate.id() == participant)
-    {
-        let ranges = forbidden_start_ranges(
-            found.unavailable_ranges(),
-            found.blocked_windows(),
-            duration,
-        );
-        if !ranges.is_empty() {
-            let forbidden = ranges
-                .iter()
-                .flat_map(|&(range_start, range_end)| range_start..=range_end);
-            builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence);
-        }
-    }
+        .find(|candidate| candidate.id() == participant)?;
+    let ranges = forbidden_start_ranges(
+        found.unavailable_ranges(),
+        found.blocked_windows(),
+        duration,
+    );
+    (!ranges.is_empty()).then(|| {
+        let forbidden = ranges
+            .iter()
+            .flat_map(|&(range_start, range_end)| range_start..=range_end);
+        builder.add_optional(Arc::new(ForbiddenValues::new(start, forbidden)), presence)
+    })
 }
 
 /// The start slots an entity's unavailability forbids, as inclusive ranges: the ranges themselves
