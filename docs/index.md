@@ -26,10 +26,19 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 
 ## Versions
 
-The latest release on crates.io is **0.9.0**, and master carries nothing beyond it. It adds
-what 0.8.0 lacked: breaks, per participant and per resource availability, activity relations,
-baseline-aware repair, participant choice groups and `CompiledProblem::check`. A run now also
-constructs a feasible schedule before optimizing it, chooses how to spend its budget (see
+The latest release on crates.io is **0.10.0**, and master carries nothing beyond it.
+
+0.10.0 moves to unifier 0.5 and is breaking only through it: `CancellationToken` is a unifier
+type re-exported here, and the hard score is now a count of *violations* rather than of violated
+constraints, so its magnitudes differ from 0.9.0's for the same schedule. Feasibility is
+unchanged — a hard score of zero still means every hard constraint holds. What the release is
+worth lies in unifier: a search now reports the best complete assignment it reached even when it
+could not vouch for it, and the construction that feeds it undoes conflicts instead of building
+on them.
+
+0.9.0 added what 0.8.0 lacked: breaks, per participant and per resource availability, activity
+relations, baseline-aware repair, participant choice groups and `CompiledProblem::check`. A run
+also constructs a feasible schedule before optimizing it, chooses how to spend its budget (see
 `SolveStrategy`), and never returns a schedule that violates hard constraints.
 
 ## Where it stops
