@@ -108,7 +108,15 @@ pub(crate) struct InternalCompiled {
     pub(crate) activities: BTreeMap<ActivityId, Activity>,
     variables: BTreeMap<ActivityId, (VariableId, VariableId)>,
     activity_by_variable: HashMap<VariableId, ActivityId>,
-    selected_resources: BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    /// Per activity, one entry per *requirement slot*, each holding that slot's candidate
+    /// resources with the presence variable standing for "this slot takes this resource".
+    ///
+    /// Grouped rather than flat because an activity can hold several requirements over one
+    /// pool, and then "which resources does this activity use" and "which resource does this
+    /// requirement use" are different questions — [`InternalCompiled::assignment_map`] needs
+    /// the second one to map a `Solution` back onto the model. Consumers that only need the
+    /// first flatten this.
+    selected_resources: BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
     fixed_resources: BTreeMap<ActivityId, Vec<ResourceId>>,
     selected_participants: BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
     fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
@@ -492,7 +500,7 @@ fn build_problem_internal(
         return Err(CompileError::new(errors));
     }
 
-    let mut selected_resources: BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>> =
+    let mut selected_resources: BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>> =
         BTreeMap::new();
     let mut selected_participants: BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>> =
         BTreeMap::new();
@@ -536,11 +544,14 @@ fn build_problem_internal(
             .map(|resource| builder.new_presence_var(format!("{activity_id}_on_{resource}")))
             .collect::<Vec<_>>();
         builder.add_exactly_one(presences.clone(), 1);
+        selected_resources.entry(activity_id).or_default().push(
+            candidates
+                .iter()
+                .copied()
+                .zip(presences.iter().copied())
+                .collect(),
+        );
         for (&resource, &presence) in candidates.iter().zip(&presences) {
-            selected_resources
-                .entry(activity_id)
-                .or_default()
-                .push((resource, presence));
             let interval = compiled_by_activity[&activity_id].interval();
             apply_optional_resource_calendar(
                 &mut builder,
@@ -892,9 +903,36 @@ impl InternalCompiled {
                 assignment.insert(start, item.window.start);
                 assignment.insert(end, item.window.end);
             }
-            if let Some(candidates) = self.selected_resources.get(&item.activity) {
-                for &(resource, presence) in candidates {
-                    assignment.insert(presence, i64::from(item.resources.contains(&resource)));
+            if let Some(slots) = self.selected_resources.get(&item.activity) {
+                // `Assignment::resources` is a set: it says which resources the activity uses,
+                // not which requirement took which. Marking every presence whose resource
+                // appears there is wrong as soon as an activity holds two requirements over
+                // one pool — both would claim both instances, and the check then reports
+                // `ExactlyOne` and capacity violations on a perfectly good schedule. So the
+                // slots are matched against the named resources instead.
+                for &(_, presence) in slots.iter().flatten() {
+                    assignment.insert(presence, 0);
+                }
+                match match_slots_to_resources(slots, &item.resources) {
+                    Some(taken) => {
+                        for (slot, resource) in slots.iter().zip(taken) {
+                            for &(candidate, presence) in slot {
+                                if candidate == resource {
+                                    assignment.insert(presence, 1);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // No assignment of requirements to instances explains this solution.
+                        // Fall back to the naive projection rather than to silence: the
+                        // solution *is* wrong, and the constraints should be the ones to say
+                        // so, with their own messages.
+                        for &(resource, presence) in slots.iter().flatten() {
+                            assignment
+                                .insert(presence, i64::from(item.resources.contains(&resource)));
+                        }
+                    }
                 }
             }
             if let Some(candidates) = self.selected_participants.get(&item.activity) {
@@ -1087,12 +1125,12 @@ impl InternalCompiled {
                 if let Some(resources) = self.fixed_resources.get(&activity.id()) {
                     assignment.resources.extend(resources);
                 }
-                if let Some(candidates) = self.selected_resources.get(&activity.id()) {
-                    assignment.resources.extend(candidates.iter().filter_map(
-                        |&(resource, presence)| {
+                if let Some(slots) = self.selected_resources.get(&activity.id()) {
+                    assignment
+                        .resources
+                        .extend(slots.iter().flatten().filter_map(|&(resource, presence)| {
                             (solution.assignment.get(&presence) == Some(&1)).then_some(resource)
-                        },
-                    ));
+                        }));
                 }
                 assignment.resources.sort_unstable();
                 assignment.resources.dedup();
@@ -1741,15 +1779,15 @@ fn apply_stability(
     stability: &StabilityBaseline,
     activities: &[Activity],
     variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
-    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
     selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
 ) {
     for (activity, baseline) in &stability.assignments {
         let Some(&(start, end)) = variables.get(activity) else {
             continue;
         };
-        if let Some(candidates) = selected_resources.get(activity) {
-            for &(resource, presence) in candidates {
+        if let Some(slots) = selected_resources.get(activity) {
+            for &(resource, presence) in slots.iter().flatten() {
                 builder.add_scored_objective(
                     "stability",
                     score_level(ScoreLevel::Strong),
@@ -1784,7 +1822,12 @@ fn apply_stability(
                 .start
                 .saturating_add(duration_as_i64(duration_of(activities, *activity)))],
         );
-        for &(resource, presence) in selected_resources.get(activity).into_iter().flatten() {
+        for &(resource, presence) in selected_resources
+            .get(activity)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             builder.add_allowed_values(
                 presence,
                 [i64::from(baseline.resources.contains(&resource))],
@@ -2193,7 +2236,7 @@ fn load_tasks_for(
     variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
     fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
     fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
-    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
     selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
     entity: EntityRef,
 ) -> Vec<BucketedTask> {
@@ -2212,14 +2255,17 @@ fn load_tasks_for(
                 {
                     tasks.push(BucketedTask::new(start, duration, units));
                 } else if let Some(presence) =
-                    selected_resources
-                        .get(&activity.id())
-                        .and_then(|candidates| {
-                            candidates
-                                .iter()
-                                .find(|(candidate, _)| *candidate == resource)
-                                .map(|(_, presence)| *presence)
-                        })
+                    selected_resources.get(&activity.id()).and_then(|slots| {
+                        // The first requirement that can take this resource. A load rule asks
+                        // how much of it this activity may use, and with several requirements
+                        // over one pool the answer is "one of them might" — which presence
+                        // variable stands for that is not something this rule distinguishes.
+                        slots
+                            .iter()
+                            .flatten()
+                            .find(|(candidate, _)| *candidate == resource)
+                            .map(|(_, presence)| *presence)
+                    })
                 {
                     tasks.push(BucketedTask::new(start, duration, units).with_presence(presence));
                 }
@@ -2269,7 +2315,7 @@ fn entity_activity_ids(
     activities: &[Activity],
     fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
     fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
-    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
     selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
     entity: EntityRef,
 ) -> Vec<ActivityId> {
@@ -2280,7 +2326,10 @@ fn entity_activity_ids(
                 fixed_resources
                     .get(&activity.id())
                     .is_some_and(|resources| resources.contains(&resource))
-                    || guaranteed_candidate(selected_resources.get(&activity.id()), resource)
+                    || guaranteed_resource_candidate(
+                        selected_resources.get(&activity.id()),
+                        resource,
+                    )
             }
             EntityRef::Participant(participant) => {
                 activity.participants().contains(&participant)
@@ -2302,6 +2351,60 @@ fn guaranteed_candidate<T: Copy + PartialEq>(
     entity: T,
 ) -> bool {
     candidates.is_some_and(|candidates| candidates.len() == 1 && candidates[0].0 == entity)
+}
+
+/// The resource counterpart, over the per-requirement grouping: an activity is guaranteed to
+/// use `resource` as soon as *one* of its requirements has it as its only candidate. The other
+/// requirements' candidates say nothing about that one.
+fn guaranteed_resource_candidate(
+    slots: Option<&Vec<Vec<(ResourceId, VariableId)>>>,
+    resource: ResourceId,
+) -> bool {
+    slots.is_some_and(|slots| {
+        slots
+            .iter()
+            .any(|slot| slot.len() == 1 && slot[0].0 == resource)
+    })
+}
+
+/// Assigns each requirement slot one of the resources a [`Solution`] names for that activity,
+/// so a set of resources can be read back as "which requirement took which".
+///
+/// Returns `None` when no such assignment exists — the solution then does not describe a
+/// schedule this model can produce, and the caller decides what to make of that. Plain
+/// backtracking: the slot count here is the number of requirements on one activity, which is
+/// a handful, and every slot is tried against at most that many resources.
+fn match_slots_to_resources(
+    slots: &[Vec<(ResourceId, VariableId)>],
+    resources: &[ResourceId],
+) -> Option<Vec<ResourceId>> {
+    fn assign(
+        slots: &[Vec<(ResourceId, VariableId)>],
+        resources: &[ResourceId],
+        used: &mut Vec<bool>,
+        taken: &mut Vec<ResourceId>,
+    ) -> bool {
+        let Some(slot) = slots.first() else {
+            return true;
+        };
+        for (index, &resource) in resources.iter().enumerate() {
+            if used[index] || !slot.iter().any(|&(candidate, _)| candidate == resource) {
+                continue;
+            }
+            used[index] = true;
+            taken.push(resource);
+            if assign(&slots[1..], resources, used, taken) {
+                return true;
+            }
+            taken.pop();
+            used[index] = false;
+        }
+        false
+    }
+
+    let mut used = vec![false; resources.len()];
+    let mut taken = Vec::with_capacity(slots.len());
+    assign(slots, resources, &mut used, &mut taken).then_some(taken)
 }
 
 /// Builds the half-open value ranges one load constraint is checked against. Delegates to
@@ -2371,7 +2474,7 @@ fn soft_goal_objective(
     variables: &BTreeMap<ActivityId, (VariableId, VariableId)>,
     fixed_resources: &BTreeMap<ActivityId, Vec<ResourceId>>,
     fixed_participants: &BTreeMap<ActivityId, Vec<ParticipantId>>,
-    selected_resources: &BTreeMap<ActivityId, Vec<(ResourceId, VariableId)>>,
+    selected_resources: &BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
     selected_participants: &BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
 ) -> Arc<dyn Objective> {
     match goal.kind {
@@ -2434,10 +2537,11 @@ fn soft_goal_objective(
                 if let Some(resources) = fixed_resources.get(&activity.id()) {
                     entries.extend(resources.iter().map(|&resource| (resource, None)));
                 }
-                if let Some(candidates) = selected_resources.get(&activity.id()) {
+                if let Some(slots) = selected_resources.get(&activity.id()) {
                     entries.extend(
-                        candidates
+                        slots
                             .iter()
+                            .flatten()
                             .map(|&(resource, presence)| (resource, Some(presence))),
                     );
                 }

@@ -208,3 +208,62 @@ fn check_equals_the_union_of_no_op_probes() {
 
     assert_eq!(probed_keys, checked_keys);
 }
+
+/// One activity, two requirements over the same pool of two capacity-1 instances — the shape
+/// a treatment step needing two devices produces.
+fn two_instances_of_one_type() -> CompiledProblem {
+    compile(&SchedulingProblem::new(
+        vec![
+            Resource::new(ResourceId(1), "device-a", 1).with_type("device"),
+            Resource::new(ResourceId(2), "device-b", 1).with_type("device"),
+        ],
+        vec![],
+        vec![
+            Activity::new(ActivityId(1), "step", TimeWindow::new(0, 10), 2)
+                .with_requirement(ResourceRequirement::matching("device", 1))
+                .with_requirement(ResourceRequirement::matching("device", 1)),
+        ],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_schedule_using_two_instances_of_one_type_checks_out() {
+    let compiled = two_instances_of_one_type();
+    let solved = compiled.solve().solution.expect("fixture is feasible");
+    assert_eq!(
+        solved.assignments[0].resources.len(),
+        2,
+        "the fixture is only interesting if both requirements were resolved"
+    );
+
+    let check = compiled.check(&solved);
+
+    // Used to report four conflicts on this perfectly good schedule — two `ExactlyOne` and
+    // both capacity constraints. `Solution` lists the activity's resources without saying
+    // which requirement took which, and the projection back onto the model marked *every*
+    // presence variable whose resource appears, so both requirements claimed both instances.
+    assert!(
+        check.is_feasible,
+        "the solver's own schedule is reported as infeasible: {:?}",
+        check.hard_violations
+    );
+    assert!(check.hard_violations.is_empty());
+}
+
+#[test]
+fn a_schedule_putting_both_requirements_on_one_instance_is_still_rejected() {
+    let compiled = two_instances_of_one_type();
+
+    // Only one instance named, so one requirement is unaccounted for — no assignment of
+    // requirements to instances can satisfy both, and the check must say so rather than
+    // quietly matching what it can.
+    let check = compiled.check(&solution(vec![
+        Assignment::new(ActivityId(1), TimeWindow::new(0, 2)).with_resource(ResourceId(1)),
+    ]));
+
+    assert!(
+        !check.is_feasible,
+        "a schedule that resolves only one of two requirements must not pass"
+    );
+}
