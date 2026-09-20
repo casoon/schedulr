@@ -51,7 +51,7 @@ impl Default for SolveOptions {
 /// How [`CompiledProblem::solve_with`] spends its budget.
 ///
 /// All of these end at the same guard: a schedule that violates hard constraints is never
-/// returned, whichever strategy produced it (see [`InternalCompiled::solve_result`]).
+/// returned, whichever strategy produced it (see `InternalCompiled::solve_result`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SolveStrategy {
     /// Construct a feasible schedule, then improve it with Branch & Bound.
@@ -80,7 +80,7 @@ pub enum SolveStrategy {
     OptimizeOnly,
 }
 
-/// Divides the run's time limit into the share [`CompiledProblem::search`] gives its
+/// Divides the run's time limit into the share `CompiledProblem::search` gives its
 /// construction phase before the optimizer takes over.
 ///
 /// Construction stops at the first hard-feasible assignment, so it only spends its whole share
@@ -166,7 +166,7 @@ impl CompiledProblem {
 
     /// Solves under the given [`SolveOptions`] (time limit, cancellation), constructing a
     /// feasible schedule first and optimizing it with whatever budget is left (see
-    /// [`CompiledProblem::search`]).
+    /// `CompiledProblem::search`).
     pub fn solve_with(&self, options: &SolveOptions) -> SolveResult {
         self.internal.solve_result(self.search(options))
     }
@@ -2662,7 +2662,7 @@ fn participant_is_assigned(
 mod tests {
     use super::*;
 
-    /// The guard in [`InternalCompiled::solve_result`]: an assignment that breaks a hard
+    /// The guard in `InternalCompiled::solve_result`: an assignment that breaks a hard
     /// constraint must not be handed on as a schedule, whatever the search claims about it.
     ///
     /// The problem itself is satisfiable — two four-unit activities fit one after the other in a
