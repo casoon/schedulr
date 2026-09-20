@@ -26,7 +26,17 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 
 ## Versions
 
-The latest release on crates.io is **0.10.0**, and master carries nothing beyond it.
+The latest release on crates.io is **0.11.0**, and master carries nothing beyond it.
+
+0.11.0 adds `SolveResult::best_effort`: how far a run got when it could not return a schedule —
+a complete assignment that breaks hard constraints, deliberately kept out of `solution` so no
+caller can mistake it for one. Hand it to `CompiledProblem::check` for the reasons, in the same
+`Conflict` vocabulary as every other explanation here. Breaking only because the struct gained a
+public field.
+
+Two paths used to drop that information on the floor: a run whose assignment the hard-constraint
+gate rejected kept nothing, and the two-phase search fell back to its construction phase and
+discarded whatever the optimizer had reached. Both now carry it through.
 
 0.10.0 moves to unifier 0.5 and is breaking only through it: `CancellationToken` is a unifier
 type re-exported here, and the hard score is now a count of *violations* rather than of violated

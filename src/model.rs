@@ -1529,6 +1529,18 @@ pub enum AbortReason {
 pub struct SolveResult {
     pub status: SolveStatus,
     pub solution: Option<Solution>,
+    /// How far the run got when it could not return a schedule — a **complete** assignment that
+    /// breaks hard constraints, deliberately kept outside [`Self::solution`] so no caller can
+    /// mistake it for one.
+    ///
+    /// Set only while `solution` is `None`, so the two can never both be present. A run that
+    /// reached nothing at all leaves it `None` too: "close" and "nowhere" are different answers
+    /// and a caller that reports them alike is not reporting anything.
+    ///
+    /// It carries no reasons of its own. Hand it to [`CompiledProblem::check`] and the verdict
+    /// comes back in the same `Conflict` vocabulary every other explanation in this crate uses —
+    /// a second way of saying "this rule is broken" would be a second thing to keep in step.
+    pub best_effort: Option<Solution>,
     pub statistics: SolveStatistics,
 }
 

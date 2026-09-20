@@ -231,7 +231,16 @@ impl CompiledProblem {
         let mut outcome = if optimized.solution.is_some() {
             optimized
         } else {
-            construction
+            // Die Konstruktion ist der Rückfall — aber die Auskunft *wie weit* steckt im
+            // Optimierer: er hat auf ihrem Ergebnis weitergearbeitet und weiß als Einziger,
+            // wie nah der Lauf am Ende kam. Ohne diese Zeile fiel sie hier lautlos heraus,
+            // und der Aufrufer bekam „kein Plan" statt „so weit kam ich" (plan/51, B4).
+            let reached = optimized.best_effort;
+            let mut fallback = construction;
+            if fallback.solution.is_none() && fallback.best_effort.is_none() {
+                fallback.best_effort = reached;
+            }
+            fallback
         };
         outcome.statistics = SearchStatistics {
             nodes_expanded: construction_statistics.nodes_expanded
@@ -1013,12 +1022,25 @@ impl InternalCompiled {
             // is known about the problem itself either, so neither `Feasible` nor `Infeasible`
             // would be honest, and an optimum that violates the rules is not an optimum.
             statistics.optimal = false;
+            // Withheld as a schedule, kept as an answer: this is the closest complete
+            // assignment the search produced, and the caller has a right to see how close.
+            let best_effort = outcome
+                .solution
+                .map(|solution| self.public_solution(solution));
             return SolveResult {
                 status: SolveStatus::Aborted(AbortReason::RejectedSolution),
                 solution: None,
+                best_effort,
                 statistics,
             };
         }
+
+        // `unifier` fills `best_effort` only while it has no solution of its own, so the two
+        // cannot both arrive here — the `if let` below leaves it `None` whenever a schedule
+        // exists.
+        let best_effort = outcome
+            .best_effort
+            .map(|solution| self.public_solution(solution));
         let solution = outcome
             .solution
             .map(|solution| self.public_solution(solution));
@@ -1026,6 +1048,7 @@ impl InternalCompiled {
         SolveResult {
             status,
             solution,
+            best_effort,
             statistics,
         }
     }
