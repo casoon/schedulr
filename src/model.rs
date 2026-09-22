@@ -1544,7 +1544,7 @@ pub struct SolveResult {
     /// reached nothing at all leaves it `None` too: "close" and "nowhere" are different answers
     /// and a caller that reports them alike is not reporting anything.
     ///
-    /// It carries no reasons of its own. Hand it to [`CompiledProblem::check`] and the verdict
+    /// It carries no reasons of its own. Hand it to [`crate::CompiledProblem::check`] and the verdict
     /// comes back in the same `Conflict` vocabulary every other explanation in this crate uses —
     /// a second way of saying "this rule is broken" would be a second thing to keep in step.
     pub best_effort: Option<Solution>,
