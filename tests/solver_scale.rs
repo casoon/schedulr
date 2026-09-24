@@ -165,11 +165,13 @@ fn schedules_a_large_instance() {
     );
 }
 
-/// How much tree the plain tree search needs for the 24-activity instance. Measured at 4258 and
+/// How much tree the plain tree search needs for the 24-activity instance. Measured at 62 and
 /// exactly reproducible; the ceiling sits roughly three times above it, which is far enough to
 /// absorb an honest change in search order and nowhere near the collapse a lost heuristic
-/// causes (that run walks 700k nodes and still finds nothing).
-const NODE_CEILING: u64 = 12_000;
+/// causes (that run walks 700k nodes and still finds nothing). Before unifier 0.5.3 asked each
+/// node whether `SelectedResourceCapacity` could still be satisfied, the same search needed
+/// 2,622 nodes — a return to that is a regression this ceiling reports.
+const NODE_CEILING: u64 = 200;
 
 /// The sensitive half: [`SolveStrategy::ConstructThenOptimize`] is single-threaded and
 /// deterministic, so this pins a *number* rather than a duration and cannot flake on a slow or

@@ -12,4 +12,4 @@ categories = ["algorithms", "mathematics"]
 exclude = ["site/**", "docs/**"]
 
 [dependencies]
-unifier = { version = "0.5.2", path = "../unifier" }
+unifier = { version = "0.5.3", path = "../unifier" }
