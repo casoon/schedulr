@@ -954,6 +954,7 @@ fn build_problem_internal(
         );
     }
 
+    let rule_buckets = Arc::new(load_bucket_ranges(problem, &expanded_activities));
     for rule in &problem.score_rules {
         let Some(&(start, _)) = variables.get(&rule.activity) else {
             continue;
@@ -961,7 +962,11 @@ fn build_problem_internal(
         builder.add_scored_objective(
             &rule.category,
             score_level(rule.level),
-            Arc::new(RuleObjective::new(start, rule.clone())),
+            Arc::new(RuleObjective::new(
+                start,
+                rule.clone(),
+                rule_buckets.clone(),
+            )),
         );
     }
 
@@ -1836,19 +1841,41 @@ struct RuleObjective {
     variable: VariableId,
     rule: ScoreRule,
     scope: [VariableId; 1],
+    /// The period buckets, for rules that speak about a position *inside* a bucket.
+    buckets: Arc<Vec<BucketRange>>,
 }
 
 impl RuleObjective {
-    fn new(variable: VariableId, rule: ScoreRule) -> Self {
+    fn new(variable: VariableId, rule: ScoreRule, buckets: Arc<Vec<BucketRange>>) -> Self {
         Self {
             variable,
             rule,
             scope: [variable],
+            buckets,
         }
+    }
+
+    /// Whether `value`'s offset from the start of its bucket lies in `[from, to)`. A value in no
+    /// bucket is never in the preferred stretch.
+    fn within_bucket(&self, value: i64, from: i64, to: i64) -> bool {
+        self.buckets
+            .iter()
+            .find(|range| range.start <= value && value < range.end)
+            .is_some_and(|range| (from..to).contains(&(value - range.start)))
     }
 
     fn contribution(&self, value: i64) -> i64 {
         match self.rule.kind {
+            ScoreRuleKind::PreferWithinBucket {
+                start_offset,
+                end_offset,
+            } => {
+                if self.within_bucket(value, start_offset, end_offset) {
+                    0
+                } else {
+                    self.rule.weight.saturating_neg()
+                }
+            }
             ScoreRuleKind::PreferWindow(window) => {
                 if window.start <= value && value < window.end {
                     0
@@ -1891,6 +1918,13 @@ impl Objective for RuleObjective {
                         .is_some_and(|max| min < window.end && max >= window.start)
                 }),
                 ScoreRuleKind::KeepStart(start) => domain.contains(start),
+                ScoreRuleKind::PreferWithinBucket {
+                    start_offset,
+                    end_offset,
+                } => domain
+                    .values()
+                    .into_iter()
+                    .any(|value| self.within_bucket(value, start_offset, end_offset)),
             };
             if can_avoid_penalty {
                 0

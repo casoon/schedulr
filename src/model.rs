@@ -841,6 +841,14 @@ pub struct AcademicPeriod {
 pub enum ScoreRuleKind {
     PreferWindow(TimeWindow),
     KeepStart(i64),
+    /// Prefer a start whose offset from the start of its period bucket lies in
+    /// `[start_offset, end_offset)` — the same stretch of every bucket, e.g. "not in the first
+    /// unit of a day". [`Self::PreferWindow`] names one window over the whole horizon and cannot
+    /// say that.
+    PreferWithinBucket {
+        start_offset: i64,
+        end_offset: i64,
+    },
 }
 
 /// Named, inspectable scoring rule. Components are attached to each produced solution.
@@ -867,6 +875,27 @@ impl ScoreRule {
             activity,
             weight,
             kind: ScoreRuleKind::PreferWindow(window),
+        }
+    }
+
+    /// Prefers starts at offsets `[start_offset, end_offset)` inside every period bucket.
+    pub fn prefer_within_bucket(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        activity: ActivityId,
+        start_offset: i64,
+        end_offset: i64,
+        weight: i64,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            activity,
+            weight,
+            kind: ScoreRuleKind::PreferWithinBucket {
+                start_offset,
+                end_offset,
+            },
         }
     }
 }
