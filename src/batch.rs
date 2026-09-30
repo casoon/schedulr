@@ -1013,6 +1013,32 @@ fn build_problem_internal(
         builder.add_scored_objective(&goal.category, score_level(goal.level), objective);
     }
 
+    // Consecutive-run limits: problem-level soft goals over a caller-chosen group of activities.
+    for rule in &problem.consecutive_run_limits {
+        let tasks: Vec<(VariableId, i64)> = rule
+            .activities
+            .iter()
+            .filter_map(|id| {
+                let &(start, _) = variables.get(id)?;
+                let activity = expanded_activities.iter().find(|a| a.id() == *id)?;
+                Some((start, duration_as_i64(activity.duration())))
+            })
+            .collect();
+        if tasks.len() < 2 {
+            continue;
+        }
+        builder.add_scored_objective(
+            &rule.category,
+            score_level(rule.level),
+            Arc::new(RunObjective::new(
+                rule.weight,
+                tasks,
+                load_bucket_ranges(problem, &expanded_activities),
+                i64::try_from(rule.max_run).unwrap_or(i64::MAX),
+            )),
+        );
+    }
+
     let graph = builder.build().map_err(|model_errors| {
         CompileError::new(model_errors.into_iter().map(|e| e.to_string()).collect())
     })?;
@@ -3011,6 +3037,86 @@ impl Objective for SpreadObjective {
             }
         }
         soft_penalty(self.weight, collisions)
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        soft_optimistic_bound(self.weight)
+    }
+}
+
+/// Penalises back-to-back runs of one group's activities longer than `max_run` inside a bucket
+/// ([`ConsecutiveRunLimit`]).
+#[derive(Debug)]
+struct RunObjective {
+    weight: i64,
+    tasks: Vec<(VariableId, i64)>,
+    ranges: Vec<BucketRange>,
+    max_run: i64,
+    scope: Vec<VariableId>,
+}
+
+impl RunObjective {
+    fn new(
+        weight: i64,
+        tasks: Vec<(VariableId, i64)>,
+        ranges: Vec<BucketRange>,
+        max_run: i64,
+    ) -> Self {
+        let mut scope: Vec<VariableId> = tasks.iter().map(|(start, _)| *start).collect();
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            weight,
+            tasks,
+            ranges,
+            max_run,
+            scope,
+        }
+    }
+}
+
+impl Objective for RunObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let mut per_bucket: BTreeMap<usize, Vec<(i64, i64)>> = BTreeMap::new();
+        for &(start_var, duration) in &self.tasks {
+            let Some(&start) = assignment.get(&start_var) else {
+                continue;
+            };
+            let Some(bucket) = bucket_of(&self.ranges, start) else {
+                continue;
+            };
+            per_bucket
+                .entry(bucket)
+                .or_default()
+                .push((start, start.saturating_add(duration)));
+        }
+        let mut excess = 0i64;
+        for intervals in per_bucket.values_mut() {
+            intervals.sort_unstable();
+            let mut run: Option<(i64, i64)> = None;
+            for &(start, end) in intervals.iter() {
+                run = match run {
+                    Some((from, to)) if start <= to => Some((from, to.max(end))),
+                    Some((from, to)) => {
+                        excess = excess.saturating_add((to - from - self.max_run).max(0));
+                        Some((start, end))
+                    }
+                    None => Some((start, end)),
+                };
+            }
+            if let Some((from, to)) = run {
+                excess = excess.saturating_add((to - from - self.max_run).max(0));
+            }
+        }
+        soft_penalty(self.weight, excess)
     }
 
     fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {

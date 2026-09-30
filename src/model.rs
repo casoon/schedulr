@@ -1207,6 +1207,42 @@ impl MaximumActiveBuckets {
     }
 }
 
+/// Soft cap on how long a back-to-back run of a group's activities may get inside one period
+/// bucket — "no more than two core-subject lessons in a row".
+///
+/// Activities of the group that touch or overlap form one run; every unit a run is longer than
+/// `max_run` costs `weight` at `level`. A preference, not a rule: the caller decides which
+/// activities belong together (one group per participant, typically), schedulr only measures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsecutiveRunLimit {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    /// Penalty per unit a run exceeds `max_run`.
+    pub weight: i64,
+    pub activities: Vec<ActivityId>,
+    /// The longest run that costs nothing.
+    pub max_run: u64,
+}
+
+impl ConsecutiveRunLimit {
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        weight: i64,
+        activities: Vec<ActivityId>,
+        max_run: u64,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            weight,
+            activities,
+            max_run,
+        }
+    }
+}
+
 /// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
 /// break between two of their activities.
 ///
@@ -1368,6 +1404,8 @@ pub struct SchedulingProblem {
     pub maximum_bucket_starts: Vec<MaximumBucketStarts>,
     /// Caps on how many period buckets one entity may be active in at all.
     pub maximum_active_buckets: Vec<MaximumActiveBuckets>,
+    /// Soft caps on how long a back-to-back run of a group's activities may get.
+    pub consecutive_run_limits: Vec<ConsecutiveRunLimit>,
     /// Groups whose activities must select the same participant (plan 33.1).
     pub participant_choice_groups: Vec<ParticipantChoiceGroup>,
     pub soft_goals: Vec<SoftGoal>,
@@ -1398,6 +1436,7 @@ impl SchedulingProblem {
             bucket_load_patterns: Vec::new(),
             maximum_bucket_starts: Vec::new(),
             maximum_active_buckets: Vec::new(),
+            consecutive_run_limits: Vec::new(),
             participant_choice_groups: Vec::new(),
             soft_goals: Vec::new(),
             participant_conflict_policy: ParticipantConflictPolicy::default(),
@@ -1543,6 +1582,12 @@ impl SchedulingProblem {
     /// Caps how many period buckets one entity may be active in.
     pub fn with_maximum_active_buckets(mut self, rule: MaximumActiveBuckets) -> Self {
         self.maximum_active_buckets.push(rule);
+        self
+    }
+
+    /// Adds a soft cap on back-to-back runs of a group of activities.
+    pub fn with_consecutive_run_limit(mut self, rule: ConsecutiveRunLimit) -> Self {
+        self.consecutive_run_limits.push(rule);
         self
     }
 
