@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod batch;
+mod construct;
 mod explain;
 mod model;
 mod repair;

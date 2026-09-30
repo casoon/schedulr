@@ -165,6 +165,19 @@ fn schedules_a_large_instance() {
     );
 }
 
+/// 576 activities over 48 groups — a whole school rather than a year group. The tree search alone
+/// does not schedule this at all; it takes the activity-wise greedy construction
+/// (`construct.rs`), repaired by Local Search (timbra plan/61). Calibrated both ways: with it the
+/// run is green, with the construction removed it ends after its 10 s without a schedule.
+#[test]
+fn schedules_a_school_sized_instance() {
+    schedules_within(
+        &instance(48, 12, 10, 60),
+        Duration::from_secs(10),
+        "576 activities",
+    );
+}
+
 /// How much tree the plain tree search needs for the 24-activity instance. Measured at 62 and
 /// exactly reproducible; the ceiling sits roughly three times above it, which is far enough to
 /// absorb an honest change in search order and nowhere near the collapse a lost heuristic

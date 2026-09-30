@@ -8,7 +8,7 @@ use crate::model::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unifier::constraint::{
     Assignment as UnifierAssignment, BucketRange, BucketedTask, Constraint, Explanation,
     PropagationResult,
@@ -18,9 +18,9 @@ use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
 use unifier::score::{Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel};
 pub use unifier::solver::CancellationToken;
 use unifier::solver::{
-    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, ParallelSolver,
-    SearchStatistics, SharedIncumbent, SolveOutcome, SolveStatus as UnifierSolveStatus,
-    SolverOptions,
+    AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, LocalSearchSolver,
+    ParallelSolver, SearchStatistics, SharedIncumbent, SolveOutcome,
+    SolveStatus as UnifierSolveStatus, SolverOptions,
 };
 use unifier::{ForbiddenValues, ModelBuilder, VariableId};
 
@@ -88,6 +88,15 @@ pub enum SolveStrategy {
 /// unseeded optimizer run, which is exactly what a single-phase search would have done.
 const CONSTRUCTION_BUDGET_DIVISOR: u32 = 2;
 
+/// Der Anteil der Konstruktionsphase, den die gierige Platzierung höchstens verbraucht, bevor
+/// die Reparatur übernimmt. Ein Anlauf kostet Millisekunden; die Grenze greift erst bei sehr
+/// großen Modellen.
+const GREEDY_BUDGET_DIVISOR: u32 = 10;
+
+/// Der Anteil der Konstruktionsphase, den die Baumsuche vorab bekommt — genug, um ein kleines
+/// Modell zu lösen oder zu widerlegen, zu wenig, um auf einem großen die Zeit zu verbrauchen.
+const QUICK_TREE_BUDGET_DIVISOR: u32 = 10;
+
 fn solver_options(time_limit: Option<Duration>, options: &SolveOptions) -> SolverOptions {
     SolverOptions {
         time_limit,
@@ -106,7 +115,7 @@ pub struct CompiledProblem {
 pub(crate) struct InternalCompiled {
     pub(crate) graph: ValidatedGraph,
     pub(crate) activities: BTreeMap<ActivityId, Activity>,
-    variables: BTreeMap<ActivityId, (VariableId, VariableId)>,
+    pub(crate) variables: BTreeMap<ActivityId, (VariableId, VariableId)>,
     activity_by_variable: HashMap<VariableId, ActivityId>,
     /// Per activity, one entry per *requirement slot*, each holding that slot's candidate
     /// resources with the presence variable standing for "this slot takes this resource".
@@ -116,10 +125,10 @@ pub(crate) struct InternalCompiled {
     /// requirement use" are different questions — [`InternalCompiled::assignment_map`] needs
     /// the second one to map a `Solution` back onto the model. Consumers that only need the
     /// first flatten this.
-    selected_resources: BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
-    fixed_resources: BTreeMap<ActivityId, Vec<ResourceId>>,
-    selected_participants: BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
-    fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
+    pub(crate) selected_resources: BTreeMap<ActivityId, Vec<Vec<(ResourceId, VariableId)>>>,
+    pub(crate) fixed_resources: BTreeMap<ActivityId, Vec<ResourceId>>,
+    pub(crate) selected_participants: BTreeMap<ActivityId, Vec<(ParticipantId, VariableId)>>,
+    pub(crate) fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
     selected_capacity_constraints: Vec<(ConstraintId, Arc<SelectedResourceCapacity>)>,
     constraint_entities: HashMap<ConstraintId, EntityRef>,
     /// Die Constraints, die eine **Verfügbarkeit** durchsetzen (Kalendersperren), nicht eine
@@ -202,8 +211,7 @@ impl CompiledProblem {
         let graph = &self.internal.graph;
         if graph.objectives().is_empty() {
             // Nothing to optimize, so construction is already the whole search.
-            return BacktrackingSolver::new()
-                .solve(graph, &solver_options(options.time_limit, options));
+            return self.construct(options.time_limit, options);
         }
         if options.strategy == SolveStrategy::OptimizeOnly {
             return BranchAndBoundSolver::new()
@@ -213,8 +221,7 @@ impl CompiledProblem {
         let construction_limit = options
             .time_limit
             .map(|limit| limit / CONSTRUCTION_BUDGET_DIVISOR);
-        let construction =
-            BacktrackingSolver::new().solve(graph, &solver_options(construction_limit, options));
+        let construction = self.construct(construction_limit, options);
 
         // Objectives cannot make unsatisfiable hard constraints satisfiable, so an exhausted
         // construction search proves infeasibility for the whole run, not just for phase one.
@@ -251,8 +258,18 @@ impl CompiledProblem {
             // und der Aufrufer bekam „kein Plan" statt „so weit kam ich" (plan/51, B4).
             let reached = optimized.best_effort;
             let mut fallback = construction;
-            if fallback.solution.is_none() && fallback.best_effort.is_none() {
-                fallback.best_effort = reached;
+            // Haben beide nur eine Beinahe-Lösung, zählt die nähere. Die der Konstruktion ist
+            // ihr tiefster Abstieg, der Rest mit Erstwerten aufgefüllt; das Portfolio hat danach
+            // mit Local Search weitergearbeitet. Vorher gewann die Konstruktion, sobald sie
+            // überhaupt eine hatte — auf 580 Terminen gab ein 300-s-Lauf so denselben Stand
+            // zurück wie ein 20-s-Lauf, alle Termine in der ersten Stunde (timbra plan/61).
+            if fallback.solution.is_none() {
+                fallback.best_effort = match (fallback.best_effort.take(), reached) {
+                    (Some(own), Some(other)) => {
+                        Some(if other.score > own.score { other } else { own })
+                    }
+                    (own, other) => own.or(other),
+                };
             }
             fallback
         };
@@ -262,6 +279,57 @@ impl CompiledProblem {
             elapsed: construction_statistics.elapsed + optimizer_statistics.elapsed,
         };
         outcome
+    }
+
+    /// Phase eins: erst kurz die Baumsuche, dann eine gierige Platzierung über Aktivitäten
+    /// (`construct.rs`), von Local Search repariert.
+    ///
+    /// Die Baumsuche zuerst, weil sie auf kleinen Modellen in Millisekunden einen Plan findet
+    /// oder beweist, dass es keinen gibt — die Reparatur kann das nicht beweisen. Auf großen
+    /// Modellen setzt sie Variable für Variable und kam auf 580 Aktivitäten nicht an einen
+    /// gültigen Plan heran, den die gierige Platzierung, die je Aktivität Start, Ressourcen und
+    /// Teilnehmer zusammen festlegt, in Millisekunden fand (timbra plan/61). Deshalb bekommt sie
+    /// nur ein Zehntel.
+    ///
+    /// Ohne Zeitlimit bleibt es bei der Baumsuche: die Reparatur hört mit Zielen erst beim
+    /// Limit auf.
+    fn construct(&self, limit: Option<Duration>, options: &SolveOptions) -> SolveOutcome {
+        let graph = &self.internal.graph;
+        let Some(limit) = limit else {
+            return BacktrackingSolver::new().solve(graph, &solver_options(None, options));
+        };
+        let started = Instant::now();
+        let tree = BacktrackingSolver::new().solve(
+            graph,
+            &solver_options(Some(limit / QUICK_TREE_BUDGET_DIVISOR), options),
+        );
+        if tree.solution.is_some() || tree.status == UnifierSolveStatus::Infeasible {
+            return tree;
+        }
+        let remaining = limit.saturating_sub(started.elapsed());
+        // Höchstens ein Zehntel des Rests fürs Legen; die Reparatur bekommt, was bleibt.
+        let deadline = Instant::now() + remaining / GREEDY_BUDGET_DIVISOR;
+        let Some(start) = self.internal.greedy_start(&self.problem, Some(deadline)) else {
+            return BacktrackingSolver::new()
+                .solve(graph, &solver_options(Some(remaining), options));
+        };
+        let mut repaired = LocalSearchSolver::default().repair_from(
+            graph,
+            &start,
+            &solver_options(Some(limit.saturating_sub(started.elapsed())), options),
+        );
+        if repaired.solution.is_none() {
+            // Keine der beiden kam durch: die nähere Beinahe-Lösung zählt.
+            repaired.best_effort = match (repaired.best_effort.take(), tree.best_effort) {
+                (Some(own), Some(other)) => Some(if other.score > own.score { other } else { own }),
+                (own, other) => own.or(other),
+            };
+        }
+        repaired.statistics = SearchStatistics {
+            nodes_expanded: tree.statistics.nodes_expanded + repaired.statistics.nodes_expanded,
+            elapsed: started.elapsed(),
+        };
+        repaired
     }
 
     pub fn explain(&self, result: &SolveResult) -> Vec<Conflict> {
@@ -2451,7 +2519,10 @@ fn match_slots_to_resources(
 /// Builds the half-open value ranges one load constraint is checked against. Delegates to
 /// [`bucket_windows`] so the solver and every caller reasoning about blocks share one notion of
 /// a bucket (plan 25, C1).
-fn load_bucket_ranges(problem: &SchedulingProblem, activities: &[Activity]) -> Vec<BucketRange> {
+pub(crate) fn load_bucket_ranges(
+    problem: &SchedulingProblem,
+    activities: &[Activity],
+) -> Vec<BucketRange> {
     let (Some(min_value), Some(max_value)) = (
         activities.iter().map(|a| a.allowed_window().start).min(),
         activities.iter().map(|a| a.allowed_window().end).max(),
