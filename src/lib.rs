@@ -16,7 +16,7 @@ pub use model::{
     AbortReason, AcademicPeriod, Activity, ActivityId, ActivityRelation,
     ActivityRelationConstraint, Assignment, BreakTemplate, BucketLoadPattern, BucketWindow,
     CompileError, Conflict, ConflictSeverity, DEFAULT_CAPACITY_DIMENSION, DayTemplate, EntityRef,
-    GroupMember, GroupMembership, MaximumDailyLoad, MinimumBreak, Participant,
+    GroupMember, GroupMembership, MaximumBucketStarts, MaximumDailyLoad, MinimumBreak, Participant,
     ParticipantChoiceGroup, ParticipantConflictPolicy, ParticipantGroup, ParticipantGroupId,
     ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement, ProposedActivity,
     Recurrence, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,

@@ -1136,6 +1136,26 @@ pub fn matches_bucket_load_pattern(
     })
 }
 
+/// Hard cap on how many of a group of activities may **start** inside one period bucket — "at
+/// most one lesson of this course per day".
+///
+/// Counts activities, not occupied time: a two-unit block counts once, which is what separates
+/// this from [`MaximumDailyLoad`]. The buckets are the schedule template's own (see
+/// [`bucket_windows`]), so what a bucket means stays the caller's business.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaximumBucketStarts {
+    /// The activities counted together, e.g. all occurrences of one course.
+    pub activities: Vec<ActivityId>,
+    /// How many of them may start in the same bucket.
+    pub limit: u64,
+}
+
+impl MaximumBucketStarts {
+    pub fn new(activities: Vec<ActivityId>, limit: u64) -> Self {
+        Self { activities, limit }
+    }
+}
+
 /// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
 /// break between two of their activities.
 ///
@@ -1293,6 +1313,8 @@ pub struct SchedulingProblem {
     pub minimum_breaks: Vec<MinimumBreak>,
     /// Allowed block shapes for groups of activities (plan 25, C1).
     pub bucket_load_patterns: Vec<BucketLoadPattern>,
+    /// Caps on how many of a group of activities may start inside one period bucket.
+    pub maximum_bucket_starts: Vec<MaximumBucketStarts>,
     /// Groups whose activities must select the same participant (plan 33.1).
     pub participant_choice_groups: Vec<ParticipantChoiceGroup>,
     pub soft_goals: Vec<SoftGoal>,
@@ -1321,6 +1343,7 @@ impl SchedulingProblem {
             maximum_daily_loads: Vec::new(),
             minimum_breaks: Vec::new(),
             bucket_load_patterns: Vec::new(),
+            maximum_bucket_starts: Vec::new(),
             participant_choice_groups: Vec::new(),
             soft_goals: Vec::new(),
             participant_conflict_policy: ParticipantConflictPolicy::default(),
@@ -1454,6 +1477,12 @@ impl SchedulingProblem {
     /// allowed shape) is ignored rather than rejected — see [`BucketLoadPattern::is_active`].
     pub fn with_bucket_load_pattern(mut self, pattern: BucketLoadPattern) -> Self {
         self.bucket_load_patterns.push(pattern);
+        self
+    }
+
+    /// Caps how many of a group of activities may start inside one period bucket.
+    pub fn with_maximum_bucket_starts(mut self, rule: MaximumBucketStarts) -> Self {
+        self.maximum_bucket_starts.push(rule);
         self
     }
 

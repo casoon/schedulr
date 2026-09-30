@@ -197,6 +197,16 @@ impl InternalCompiled {
             })
             .flat_map(|(index, pattern)| pattern.activities.iter().map(move |&id| (id, index)))
             .collect();
+        // Je Aktivität die Start-Obergrenzen, zu denen sie zählt (Index, Grenze).
+        let mut start_limits: HashMap<ActivityId, Vec<(usize, u64)>> = HashMap::new();
+        for (index, rule) in problem.maximum_bucket_starts.iter().enumerate() {
+            for &activity in &rule.activities {
+                start_limits
+                    .entry(activity)
+                    .or_default()
+                    .push((index, rule.limit));
+            }
+        }
         let activity_list: Vec<_> = self.activities.values().cloned().collect();
         let buckets = load_bucket_ranges(problem, &activity_list);
 
@@ -227,6 +237,7 @@ impl InternalCompiled {
             let mut state = Attempt {
                 occupancy: Occupancy::new(origin, length),
                 pattern_blocks: HashMap::new(),
+                starts: HashMap::new(),
                 chosen: HashMap::new(),
                 load: HashMap::new(),
                 placements: BTreeMap::new(),
@@ -242,10 +253,13 @@ impl InternalCompiled {
                         unit,
                         anchor,
                         &state,
-                        &capacities,
-                        &choice_group,
-                        &pattern_group,
-                        &buckets,
+                        &Rules {
+                            capacities: &capacities,
+                            choice_group: &choice_group,
+                            pattern_group: &pattern_group,
+                            start_limits: &start_limits,
+                            buckets: &buckets,
+                        },
                         &mut rng,
                     )
                 });
@@ -253,10 +267,13 @@ impl InternalCompiled {
                     Some(placements) => self.commit(
                         placements,
                         &mut state,
-                        &capacities,
-                        &choice_group,
-                        &pattern_group,
-                        &buckets,
+                        &Rules {
+                            capacities: &capacities,
+                            choice_group: &choice_group,
+                            pattern_group: &pattern_group,
+                            start_limits: &start_limits,
+                            buckets: &buckets,
+                        },
                     ),
                     None => {
                         failures += 1;
@@ -379,18 +396,23 @@ impl InternalCompiled {
         holders
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn try_place(
         &self,
         unit: &Unit,
         anchor: i64,
         state: &Attempt,
-        capacities: &HashMap<ResourceId, u16>,
-        choice_group: &HashMap<ActivityId, usize>,
-        pattern_group: &HashMap<ActivityId, usize>,
-        buckets: &[BucketRange],
+        rules: &Rules<'_>,
         rng: &mut Lcg,
     ) -> Option<Vec<(ActivityId, Placement)>> {
+        let Rules {
+            capacities,
+            choice_group,
+            pattern_group,
+            start_limits,
+            buckets,
+        } = *rules;
+        // Starts, die diese Einheit selbst schon je (Regel, Bucket) beansprucht.
+        let mut own_starts: HashMap<(usize, usize), u64> = HashMap::new();
         // Was diese Einheit selbst schon belegt: zwei Mitglieder dürfen sich keinen Träger teilen.
         let mut own: Vec<(Holder, i64, i64)> = Vec::new();
         let taken_by_unit = |own: &[(Holder, i64, i64)], holder: Holder, start: i64, end: i64| {
@@ -412,6 +434,15 @@ impl InternalCompiled {
                     return None;
                 }
                 own.push((holder, start, end));
+            }
+            for &(rule, limit) in start_limits.get(&activity).into_iter().flatten() {
+                let key = (rule, bucket_of(buckets, start));
+                let used = state.starts.get(&key).copied().unwrap_or(0)
+                    + own_starts.get(&key).copied().unwrap_or(0);
+                if used >= limit {
+                    return None;
+                }
+                *own_starts.entry(key).or_default() += 1;
             }
             if let Some(&pattern) = pattern_group.get(&activity) {
                 let bucket = bucket_of(buckets, start);
@@ -476,11 +507,15 @@ impl InternalCompiled {
         &self,
         placements: Vec<(ActivityId, Placement)>,
         state: &mut Attempt,
-        _capacities: &HashMap<ResourceId, u16>,
-        choice_group: &HashMap<ActivityId, usize>,
-        pattern_group: &HashMap<ActivityId, usize>,
-        buckets: &[BucketRange],
+        rules: &Rules<'_>,
     ) {
+        let Rules {
+            choice_group,
+            pattern_group,
+            start_limits,
+            buckets,
+            ..
+        } = *rules;
         for (activity, placement) in placements {
             let duration = i64::try_from(self.activities[&activity].duration()).unwrap_or(0);
             let (start, end) = (placement.start, placement.start + duration);
@@ -498,6 +533,12 @@ impl InternalCompiled {
                 if let Some(&group) = choice_group.get(&activity) {
                     state.chosen.entry(group).or_insert(participant);
                 }
+            }
+            for &(rule, _) in start_limits.get(&activity).into_iter().flatten() {
+                *state
+                    .starts
+                    .entry((rule, bucket_of(buckets, start)))
+                    .or_default() += 1;
             }
             if let Some(&pattern) = pattern_group.get(&activity) {
                 state
@@ -574,11 +615,24 @@ struct Attempt {
     /// Je (Blockform-Gruppe, Bucket) die gelegten Blöcke — zwei Blöcke derselben Gruppe dürfen
     /// sich in einem Bucket nicht berühren, sonst läsen sie sich als ein längerer Block.
     pattern_blocks: HashMap<(usize, usize), Vec<(i64, i64)>>,
+    /// Je (Start-Obergrenze, Bucket), wie viele Aktivitäten dort schon beginnen.
+    starts: HashMap<(usize, usize), u64>,
     /// Je Auswahlgruppe der gewählte Teilnehmer.
     chosen: HashMap<usize, ParticipantId>,
     /// Belegte Zeit je wählbarem Teilnehmer, damit die Wahl sich verteilt.
     load: HashMap<ParticipantId, i64>,
     placements: BTreeMap<ActivityId, Placement>,
+}
+
+/// Die Regeln, die ein Anlauf beim Legen beachtet — gebündelt, weil jede Platzierung sie alle
+/// braucht.
+#[derive(Clone, Copy)]
+struct Rules<'a> {
+    capacities: &'a HashMap<ResourceId, u16>,
+    choice_group: &'a HashMap<ActivityId, usize>,
+    pattern_group: &'a HashMap<ActivityId, usize>,
+    start_limits: &'a HashMap<ActivityId, Vec<(usize, u64)>>,
+    buckets: &'a [BucketRange],
 }
 
 fn bucket_of(buckets: &[BucketRange], value: i64) -> usize {

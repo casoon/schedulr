@@ -895,6 +895,27 @@ fn build_problem_internal(
         }
     }
 
+    // MaximumBucketStarts: count starts, not time — one unit-length marker task per activity.
+    if !problem.maximum_bucket_starts.is_empty() {
+        let ranges = load_bucket_ranges(problem, &expanded_activities);
+        for rule in &problem.maximum_bucket_starts {
+            let tasks: Vec<BucketedTask> = rule
+                .activities
+                .iter()
+                .filter_map(|id| variables.get(id))
+                .map(|&(start, _)| BucketedTask::new(start, 1, 1))
+                .collect();
+            if tasks.len() as u64 <= rule.limit {
+                continue;
+            }
+            builder.add_maximum_bucket_load(
+                tasks,
+                ranges.clone(),
+                i64::try_from(rule.limit).unwrap_or(i64::MAX),
+            );
+        }
+    }
+
     // MinimumBreak: minimum distance between any two of an entity's deterministically assigned
     // activities. Multi-candidate pools are not paired (a distance may only apply when the entity
     // is selected for *both* activities, a condition the available primitives cannot express);
