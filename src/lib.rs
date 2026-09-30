@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+mod active_buckets;
 mod batch;
 mod construct;
 mod explain;
@@ -16,13 +17,13 @@ pub use model::{
     AbortReason, AcademicPeriod, Activity, ActivityId, ActivityRelation,
     ActivityRelationConstraint, Assignment, BreakTemplate, BucketLoadPattern, BucketWindow,
     CompileError, Conflict, ConflictSeverity, DEFAULT_CAPACITY_DIMENSION, DayTemplate, EntityRef,
-    GroupMember, GroupMembership, MaximumBucketStarts, MaximumDailyLoad, MinimumBreak, Participant,
-    ParticipantChoiceGroup, ParticipantConflictPolicy, ParticipantGroup, ParticipantGroupId,
-    ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement, ProposedActivity,
-    Recurrence, Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement,
-    ScheduleTemplate, SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule,
-    ScoreRuleKind, SlotTemplate, SoftGoal, SoftGoalKind, Solution, SolutionCheck, SolveResult,
-    SolveStatistics, SolveStatus, TimeWindow, bucket_load_blocks, bucket_load_pattern,
+    GroupMember, GroupMembership, MaximumActiveBuckets, MaximumBucketStarts, MaximumDailyLoad,
+    MinimumBreak, Participant, ParticipantChoiceGroup, ParticipantConflictPolicy, ParticipantGroup,
+    ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
+    ProposedActivity, Recurrence, Resource, ResourceId, ResourcePool, ResourcePoolId,
+    ResourceRequirement, ScheduleTemplate, SchedulingProblem, Score, ScoreComponent, ScoreLevel,
+    ScoreRule, ScoreRuleKind, SlotTemplate, SoftGoal, SoftGoalKind, Solution, SolutionCheck,
+    SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_load_blocks, bucket_load_pattern,
     bucket_windows, matches_bucket_load_pattern,
 };
 pub use repair::{RepairOptions, RepairOutcome, RepairResult};

@@ -1,3 +1,4 @@
+use crate::active_buckets::ActiveBucketLimit;
 use crate::model::{
     AbortReason, Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict,
     ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
@@ -892,6 +893,32 @@ fn build_problem_internal(
                 })
                 .collect();
             builder.add_bucket_block_pattern(tasks, ranges.clone(), allowed);
+        }
+    }
+
+    // MaximumActiveBuckets: whether an entity is in a bucket at all, not how much.
+    if !problem.maximum_active_buckets.is_empty() {
+        let ranges = load_bucket_ranges(problem, &expanded_activities);
+        for rule in &problem.maximum_active_buckets {
+            let tasks = load_tasks_for(
+                problem,
+                &expanded_activities,
+                &variables,
+                &fixed_resources,
+                &fixed_participants,
+                &selected_resources,
+                &selected_participants,
+                rule.entity,
+            );
+            if tasks.is_empty() {
+                continue;
+            }
+            let constraint = builder.add_constraint(Arc::new(ActiveBucketLimit::new(
+                tasks,
+                ranges.clone(),
+                usize::try_from(rule.limit).unwrap_or(usize::MAX),
+            )));
+            constraint_entities.insert(constraint, rule.entity);
         }
     }
 

@@ -1185,6 +1185,28 @@ impl MaximumBucketStarts {
     }
 }
 
+/// Hard cap on how many period buckets one entity is active in at all — "on at most four days".
+///
+/// Asks *whether* anything of the entity lies in a bucket, not how much: which buckets stay free
+/// is left to the search, which is what separates it from blocking fixed windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaximumActiveBuckets {
+    /// Resource or participant the limit applies to.
+    pub entity: EntityRef,
+    /// How many buckets it may be active in.
+    pub limit: u64,
+}
+
+impl MaximumActiveBuckets {
+    pub const fn new(entity: EntityRef, limit: u64) -> Self {
+        Self { entity, limit }
+    }
+
+    pub const fn for_participant(participant: ParticipantId, limit: u64) -> Self {
+        Self::new(EntityRef::Participant(participant), limit)
+    }
+}
+
 /// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
 /// break between two of their activities.
 ///
@@ -1344,6 +1366,8 @@ pub struct SchedulingProblem {
     pub bucket_load_patterns: Vec<BucketLoadPattern>,
     /// Caps on how many of a group of activities may start inside one period bucket.
     pub maximum_bucket_starts: Vec<MaximumBucketStarts>,
+    /// Caps on how many period buckets one entity may be active in at all.
+    pub maximum_active_buckets: Vec<MaximumActiveBuckets>,
     /// Groups whose activities must select the same participant (plan 33.1).
     pub participant_choice_groups: Vec<ParticipantChoiceGroup>,
     pub soft_goals: Vec<SoftGoal>,
@@ -1373,6 +1397,7 @@ impl SchedulingProblem {
             minimum_breaks: Vec::new(),
             bucket_load_patterns: Vec::new(),
             maximum_bucket_starts: Vec::new(),
+            maximum_active_buckets: Vec::new(),
             participant_choice_groups: Vec::new(),
             soft_goals: Vec::new(),
             participant_conflict_policy: ParticipantConflictPolicy::default(),
@@ -1512,6 +1537,12 @@ impl SchedulingProblem {
     /// Caps how many of a group of activities may start inside one period bucket.
     pub fn with_maximum_bucket_starts(mut self, rule: MaximumBucketStarts) -> Self {
         self.maximum_bucket_starts.push(rule);
+        self
+    }
+
+    /// Caps how many period buckets one entity may be active in.
+    pub fn with_maximum_active_buckets(mut self, rule: MaximumActiveBuckets) -> Self {
+        self.maximum_active_buckets.push(rule);
         self
     }
 

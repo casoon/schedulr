@@ -14,8 +14,10 @@
 //! durch die übliche Prüfung.
 
 use crate::batch::{InternalCompiled, load_bucket_ranges};
-use crate::model::{ActivityId, ActivityRelation, ParticipantId, ResourceId, SchedulingProblem};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use crate::model::{
+    ActivityId, ActivityRelation, EntityRef, ParticipantId, ResourceId, SchedulingProblem,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use unifier::constraint::PropagationResult;
 use unifier::{BucketRange, PropagationEngine, TrailedDomains, VariableId};
@@ -207,6 +209,20 @@ impl InternalCompiled {
                     .push((index, rule.limit));
             }
         }
+        // Träger, die nur an wenigen Buckets aktiv sein dürfen.
+        let active_limits: HashMap<Holder, usize> = problem
+            .maximum_active_buckets
+            .iter()
+            .filter_map(|rule| {
+                let holder = match rule.entity {
+                    EntityRef::Participant(participant) => Holder::Participant(participant),
+                    EntityRef::Resource(resource) => Holder::Resource(resource),
+                    // Eine Aktivität ist nie „an Tagen aktiv“ — die Regel spricht über Träger.
+                    EntityRef::Activity(_) => return None,
+                };
+                Some((holder, usize::try_from(rule.limit).unwrap_or(usize::MAX)))
+            })
+            .collect();
         let activity_list: Vec<_> = self.activities.values().cloned().collect();
         let buckets = load_bucket_ranges(problem, &activity_list);
 
@@ -238,6 +254,7 @@ impl InternalCompiled {
                 occupancy: Occupancy::new(origin, length),
                 pattern_blocks: HashMap::new(),
                 starts: HashMap::new(),
+                active: HashMap::new(),
                 chosen: HashMap::new(),
                 load: HashMap::new(),
                 placements: BTreeMap::new(),
@@ -258,6 +275,7 @@ impl InternalCompiled {
                             choice_group: &choice_group,
                             pattern_group: &pattern_group,
                             start_limits: &start_limits,
+                            active_limits: &active_limits,
                             buckets: &buckets,
                         },
                         &mut rng,
@@ -272,6 +290,7 @@ impl InternalCompiled {
                             choice_group: &choice_group,
                             pattern_group: &pattern_group,
                             start_limits: &start_limits,
+                            active_limits: &active_limits,
                             buckets: &buckets,
                         },
                     ),
@@ -409,8 +428,24 @@ impl InternalCompiled {
             choice_group,
             pattern_group,
             start_limits,
+            active_limits,
             buckets,
         } = *rules;
+        // Ob ein Träger in diesem Bucket noch aktiv werden darf: schon aktiv, oder noch Platz.
+        let mut opened: HashMap<Holder, Vec<usize>> = HashMap::new();
+        let may_be_active =
+            |opened: &HashMap<Holder, Vec<usize>>, holder: Holder, bucket: usize| {
+                let Some(&limit) = active_limits.get(&holder) else {
+                    return true;
+                };
+                let used = state.active.get(&holder);
+                if used.is_some_and(|set| set.contains(&bucket))
+                    || opened.get(&holder).is_some_and(|new| new.contains(&bucket))
+                {
+                    return true;
+                }
+                used.map_or(0, BTreeSet::len) + opened.get(&holder).map_or(0, Vec::len) < limit
+            };
         // Starts, die diese Einheit selbst schon je (Regel, Bucket) beansprucht.
         let mut own_starts: HashMap<(usize, usize), u64> = HashMap::new();
         // Was diese Einheit selbst schon belegt: zwei Mitglieder dürfen sich keinen Träger teilen.
@@ -427,13 +462,16 @@ impl InternalCompiled {
         for &(activity, offset) in &unit.members {
             let start = anchor + offset;
             let end = start + i64::try_from(self.activities[&activity].duration()).ok()?;
+            let bucket = bucket_of(buckets, start);
             for holder in self.fixed_holders(activity) {
                 if !state.occupancy.free(holder, capacity(holder), start, end)
                     || taken_by_unit(&own, holder, start, end)
+                    || !may_be_active(&opened, holder, bucket)
                 {
                     return None;
                 }
                 own.push((holder, start, end));
+                opened.entry(holder).or_default().push(bucket);
             }
             for &(rule, limit) in start_limits.get(&activity).into_iter().flatten() {
                 let key = (rule, bucket_of(buckets, start));
@@ -465,8 +503,13 @@ impl InternalCompiled {
                     let holder = Holder::Resource(resource);
                     state.occupancy.free(holder, capacity(holder), start, end)
                         && !taken_by_unit(&own, holder, start, end)
+                        && may_be_active(&opened, holder, bucket)
                 })?;
                 own.push((Holder::Resource(resource), start, end));
+                opened
+                    .entry(Holder::Resource(resource))
+                    .or_default()
+                    .push(bucket);
                 resources.push(resource);
             }
             let mut participant = None;
@@ -487,8 +530,13 @@ impl InternalCompiled {
                     let holder = Holder::Participant(option);
                     state.occupancy.free(holder, 1, start, end)
                         && !taken_by_unit(&own, holder, start, end)
+                        && may_be_active(&opened, holder, bucket)
                 })?;
                 own.push((Holder::Participant(picked), start, end));
+                opened
+                    .entry(Holder::Participant(picked))
+                    .or_default()
+                    .push(bucket);
                 participant = Some(picked);
             }
             result.push((
@@ -513,12 +561,22 @@ impl InternalCompiled {
             choice_group,
             pattern_group,
             start_limits,
+            active_limits,
             buckets,
             ..
         } = *rules;
         for (activity, placement) in placements {
             let duration = i64::try_from(self.activities[&activity].duration()).unwrap_or(0);
             let (start, end) = (placement.start, placement.start + duration);
+            let bucket = bucket_of(buckets, start);
+            let mut holders = self.fixed_holders(activity);
+            holders.extend(placement.resources.iter().map(|&r| Holder::Resource(r)));
+            holders.extend(placement.participant.map(Holder::Participant));
+            for &holder in &holders {
+                if active_limits.contains_key(&holder) {
+                    state.active.entry(holder).or_default().insert(bucket);
+                }
+            }
             for holder in self.fixed_holders(activity) {
                 state.occupancy.take(holder, start, end);
             }
@@ -617,6 +675,8 @@ struct Attempt {
     pattern_blocks: HashMap<(usize, usize), Vec<(i64, i64)>>,
     /// Je (Start-Obergrenze, Bucket), wie viele Aktivitäten dort schon beginnen.
     starts: HashMap<(usize, usize), u64>,
+    /// Je Träger mit Bucket-Grenze die Buckets, in denen er schon aktiv ist.
+    active: HashMap<Holder, BTreeSet<usize>>,
     /// Je Auswahlgruppe der gewählte Teilnehmer.
     chosen: HashMap<usize, ParticipantId>,
     /// Belegte Zeit je wählbarem Teilnehmer, damit die Wahl sich verteilt.
@@ -632,6 +692,7 @@ struct Rules<'a> {
     choice_group: &'a HashMap<ActivityId, usize>,
     pattern_group: &'a HashMap<ActivityId, usize>,
     start_limits: &'a HashMap<ActivityId, Vec<(usize, u64)>>,
+    active_limits: &'a HashMap<Holder, usize>,
     buckets: &'a [BucketRange],
 }
 
