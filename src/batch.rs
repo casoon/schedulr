@@ -1929,6 +1929,16 @@ impl RuleObjective {
                     self.rule.weight.saturating_neg()
                 }
             }
+            ScoreRuleKind::AvoidWithinBucket {
+                start_offset,
+                end_offset,
+            } => {
+                if self.within_bucket(value, start_offset, end_offset) {
+                    self.rule.weight.saturating_neg()
+                } else {
+                    0
+                }
+            }
             ScoreRuleKind::PreferWindow(window) => {
                 if window.start <= value && value < window.end {
                     0
@@ -1978,6 +1988,13 @@ impl Objective for RuleObjective {
                     .values()
                     .into_iter()
                     .any(|value| self.within_bucket(value, start_offset, end_offset)),
+                ScoreRuleKind::AvoidWithinBucket {
+                    start_offset,
+                    end_offset,
+                } => domain
+                    .values()
+                    .into_iter()
+                    .any(|value| !self.within_bucket(value, start_offset, end_offset)),
             };
             if can_avoid_penalty {
                 0

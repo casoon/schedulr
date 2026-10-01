@@ -64,3 +64,32 @@ fn the_wish_keeps_lessons_out_of_the_first_unit() {
 fn the_wish_never_makes_a_schedule_impossible() {
     assert_eq!(starts(TimeWindow::new(4, 5), 1), vec![4]);
 }
+
+/// `AvoidWithinBucket`, the opposite wish: lessons stay out of the third unit of every day —
+/// "not directly after the lunch break".
+#[test]
+fn an_avoided_stretch_stays_empty() {
+    let activities: Vec<Activity> = (1..=3)
+        .map(|id| Activity::new(ActivityId(id), format!("l{id}"), TimeWindow::new(0, 12), 1))
+        .collect();
+    let mut problem =
+        SchedulingProblem::new(vec![], vec![], activities).with_schedule_template(three_days());
+    for id in 1..=3 {
+        problem = problem.with_score_rule(ScoreRule::avoid_within_bucket(
+            "nicht nach der Pause",
+            ScoreLevel::Medium,
+            ActivityId(id),
+            2,
+            3,
+            1,
+        ));
+    }
+    let solution = compile(&problem)
+        .expect("compiles")
+        .solve()
+        .solution
+        .expect("a schedule exists");
+    for assignment in &solution.assignments {
+        assert_ne!(assignment.window.start % 4, 2, "{assignment:?}");
+    }
+}

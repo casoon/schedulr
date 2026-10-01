@@ -849,6 +849,14 @@ pub enum ScoreRuleKind {
         start_offset: i64,
         end_offset: i64,
     },
+    /// The opposite: penalise a start whose offset from the start of its bucket lies in
+    /// `[start_offset, end_offset)` — "not directly after the lunch break", "no single lesson in
+    /// the afternoon". Two separate stretches to avoid need two rules, one stretch to prefer
+    /// would need its complement — which is why both kinds exist.
+    AvoidWithinBucket {
+        start_offset: i64,
+        end_offset: i64,
+    },
 }
 
 /// Named, inspectable scoring rule. Components are attached to each produced solution.
@@ -875,6 +883,27 @@ impl ScoreRule {
             activity,
             weight,
             kind: ScoreRuleKind::PreferWindow(window),
+        }
+    }
+
+    /// Penalises starts at offsets `[start_offset, end_offset)` inside every period bucket.
+    pub fn avoid_within_bucket(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        activity: ActivityId,
+        start_offset: i64,
+        end_offset: i64,
+        weight: i64,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            activity,
+            weight,
+            kind: ScoreRuleKind::AvoidWithinBucket {
+                start_offset,
+                end_offset,
+            },
         }
     }
 
