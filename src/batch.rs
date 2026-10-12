@@ -1,22 +1,30 @@
 use crate::active_buckets::ActiveBucketLimit;
-use crate::model::{
-    AbortReason, Activity, ActivityId, ActivityRelation, Assignment, CompileError, Conflict,
-    ConflictSeverity, EntityRef, GroupMember, Participant, ParticipantGroupId, ParticipantId,
-    ParticipantRequirement, Resource, ResourceId, ResourcePool, ResourceRequirement,
-    SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SoftGoal,
-    SoftGoalKind, Solution, SolutionCheck, SolveResult, SolveStatistics, SolveStatus, TimeWindow,
-    bucket_windows,
+use crate::bucket_rules::{
+    ActivityGoalObjective, ActivityGoalShape, BucketRule, BucketRuleKind, ConcurrentFreeObjective,
+    DistinctPerBucket, GoalTask, IsolatedBlockObjective, JointPresenceObjective, JointTask,
+    Proximity, ResourceCostObjective, RoomChangeObjective, RoomOptions, RoomTask, Track,
 };
+use crate::model::{
+    AbortReason, Activity, ActivityGoalKind, ActivityId, ActivityRelation, Assignment,
+    CompileError, Conflict, ConflictSeverity, DayRuleKind, EntityRef, GroupMember, IdleBounds,
+    Participant, ParticipantGroupId, ParticipantId, ParticipantRequirement, ProximityMode,
+    Resource, ResourceId, ResourcePool, ResourceRequirement, SchedulingProblem, Score,
+    ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SoftGoal, SoftGoalKind, SoftPenalty,
+    Solution, SolutionCheck, SolveResult, SolveStatistics, SolveStatus, TimeWindow, bucket_windows,
+};
+use crate::pairwise_distance::PairwiseDistance;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unifier::constraint::{
-    Assignment as UnifierAssignment, BucketRange, BucketedTask, Constraint, Explanation,
-    PropagationResult,
+    Assignment as UnifierAssignment, BucketBlockPattern, BucketRange, BucketedTask, Constraint,
+    Equal, Explanation, MaximumBucketLoad, NoOverlap, Precedence, PropagationResult,
 };
 use unifier::model::domain::{Domain, TrailedDomains};
 use unifier::propagation::{ConstraintId, ConstraintViolation, ValidatedGraph};
-use unifier::score::{Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel};
+use unifier::score::{
+    ConstraintPenalty, Objective, ScoreCalculator, ScoreLevel as UnifierScoreLevel,
+};
 pub use unifier::solver::CancellationToken;
 use unifier::solver::{
     AbortReason as UnifierAbortReason, BacktrackingSolver, BranchAndBoundSolver, LocalSearchSolver,
@@ -615,29 +623,39 @@ fn build_problem_internal(
     for relation in &problem.relations {
         let first_interval = compiled_by_activity[&relation.first].interval();
         let second_interval = compiled_by_activity[&relation.second].interval();
-        match relation.relation {
-            ActivityRelation::SameStart => {
-                builder.add_equal(first_interval.start(), second_interval.start(), 0);
-            }
+        let constraint: Arc<dyn Constraint> = match relation.relation {
+            ActivityRelation::SameStart => Arc::new(Equal::new(
+                first_interval.start(),
+                second_interval.start(),
+                0,
+            )),
             ActivityRelation::Consecutive => {
-                builder.add_equal(first_interval.end(), second_interval.start(), 0);
+                Arc::new(Equal::new(first_interval.end(), second_interval.start(), 0))
             }
             ActivityRelation::Precedence { min_gap } => {
-                builder.add_precedence(first_interval, second_interval, min_gap);
+                Arc::new(Precedence::new(first_interval, second_interval, min_gap))
             }
-            ActivityRelation::FixedOffset { offset } => {
-                // `add_equal(v1, v2, k)` means `v1 = v2 + k`; the relation wants
-                // `second.start = first.start + offset`, so `second` is `v1`.
-                builder.add_equal(second_interval.start(), first_interval.start(), offset);
-            }
+            // `Equal::new(v1, v2, k)` means `v1 = v2 + k`; the relation wants
+            // `second.start = first.start + offset`, so `second` is `v1`.
+            ActivityRelation::FixedOffset { offset } => Arc::new(Equal::new(
+                second_interval.start(),
+                first_interval.start(),
+                offset,
+            )),
             ActivityRelation::NoOverlap => {
                 let first_duration = duration_of(&expanded_activities, relation.first);
                 let second_duration = duration_of(&expanded_activities, relation.second);
-                builder.add_no_overlap(
+                Arc::new(NoOverlap::from_intervals(
                     &[first_interval.clone(), second_interval.clone()],
                     &[first_duration, second_duration],
-                );
+                ))
             }
+        };
+        match &relation.penalty {
+            None => {
+                builder.add_constraint(constraint);
+            }
+            Some(penalty) => add_penalty(&mut builder, penalty, constraint),
         }
     }
     let mut flexible_tasks: BTreeMap<ResourceId, Vec<SelectedTask>> = BTreeMap::new();
@@ -861,11 +879,15 @@ fn build_problem_internal(
             if tasks.is_empty() {
                 continue;
             }
-            builder.add_maximum_bucket_load(
-                tasks,
-                ranges.clone(),
-                i64::try_from(rule.limit).unwrap_or(i64::MAX),
-            );
+            let limit = i64::try_from(rule.limit).unwrap_or(i64::MAX);
+            match &rule.penalty {
+                None => builder.add_maximum_bucket_load(tasks, ranges.clone(), limit),
+                Some(penalty) => add_penalty(
+                    &mut builder,
+                    penalty,
+                    Arc::new(MaximumBucketLoad::new(tasks, ranges.clone(), limit)),
+                ),
+            }
         }
     }
 
@@ -892,7 +914,14 @@ fn build_problem_internal(
                         .collect()
                 })
                 .collect();
-            builder.add_bucket_block_pattern(tasks, ranges.clone(), allowed);
+            match &pattern.penalty {
+                None => builder.add_bucket_block_pattern(tasks, ranges.clone(), allowed),
+                Some(penalty) => add_penalty(
+                    &mut builder,
+                    penalty,
+                    Arc::new(BucketBlockPattern::new(tasks, ranges.clone(), allowed)),
+                ),
+            }
         }
     }
 
@@ -913,12 +942,18 @@ fn build_problem_internal(
             if tasks.is_empty() {
                 continue;
             }
-            let constraint = builder.add_constraint(Arc::new(ActiveBucketLimit::new(
+            let limit = Arc::new(ActiveBucketLimit::new(
                 tasks,
                 ranges.clone(),
                 usize::try_from(rule.limit).unwrap_or(usize::MAX),
-            )));
-            constraint_entities.insert(constraint, rule.entity);
+            ));
+            match &rule.penalty {
+                None => {
+                    let constraint = builder.add_constraint(limit);
+                    constraint_entities.insert(constraint, rule.entity);
+                }
+                Some(penalty) => add_penalty(&mut builder, penalty, limit),
+            }
         }
     }
 
@@ -935,11 +970,15 @@ fn build_problem_internal(
             if tasks.len() as u64 <= rule.limit {
                 continue;
             }
-            builder.add_maximum_bucket_load(
-                tasks,
-                ranges.clone(),
-                i64::try_from(rule.limit).unwrap_or(i64::MAX),
-            );
+            let limit = i64::try_from(rule.limit).unwrap_or(i64::MAX);
+            match &rule.penalty {
+                None => builder.add_maximum_bucket_load(tasks, ranges.clone(), limit),
+                Some(penalty) => add_penalty(
+                    &mut builder,
+                    penalty,
+                    Arc::new(MaximumBucketLoad::new(tasks, ranges.clone(), limit)),
+                ),
+            }
         }
     }
 
@@ -959,6 +998,17 @@ fn build_problem_internal(
             &selected_participants,
             rule.entity,
         );
+        if let Some(penalty) = &rule.penalty {
+            // One objective over all pairs, not one per pair: objectives are scanned on every
+            // move, and an entity with n activities has n(n-1)/2 pairs.
+            let starts = activity_ids.iter().map(|id| variables[id].0).collect();
+            add_penalty(
+                &mut builder,
+                penalty,
+                Arc::new(PairwiseDistance::new(starts, rule.min_distance)),
+            );
+            continue;
+        }
         for (index, &first) in activity_ids.iter().enumerate() {
             for &second in &activity_ids[index + 1..] {
                 builder.add_minimum_distance(
@@ -1036,6 +1086,366 @@ fn build_problem_internal(
                 load_bucket_ranges(problem, &expanded_activities),
                 i64::try_from(rule.max_run).unwrap_or(i64::MAX),
             )),
+        );
+    }
+
+    // Idle bounds: one entity's free time between its assignments, per bucket, summed.
+    for rule in &problem.idle_bounds {
+        let track = load_tasks_for(
+            problem,
+            &expanded_activities,
+            &variables,
+            &fixed_resources,
+            &fixed_participants,
+            &selected_resources,
+            &selected_participants,
+            rule.entity,
+        );
+        if track.is_empty() {
+            continue;
+        }
+        builder.add_scored_objective(
+            &rule.category,
+            score_level(rule.level),
+            Arc::new(IdleBoundsObjective::new(
+                track,
+                load_bucket_ranges(problem, &expanded_activities),
+                rule.clone(),
+            )),
+        );
+    }
+
+    // Day rules, distinct caps and day goals (plan 69, package A).
+    let day_ranges = load_bucket_ranges(problem, &expanded_activities);
+    let tasks_for = |entity: EntityRef| {
+        load_tasks_for(
+            problem,
+            &expanded_activities,
+            &variables,
+            &fixed_resources,
+            &fixed_participants,
+            &selected_resources,
+            &selected_participants,
+            entity,
+        )
+    };
+    let as_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    for rule in &problem.day_rules {
+        let tasks = tasks_for(rule.entity);
+        if tasks.is_empty() {
+            continue;
+        }
+        let kind = match rule.kind {
+            DayRuleKind::MinimumLoad { limit } => BucketRuleKind::MinimumLoad {
+                limit: as_i64(limit),
+            },
+            DayRuleKind::MaximumSpan { limit } => BucketRuleKind::MaximumSpan {
+                limit: as_i64(limit),
+            },
+            DayRuleKind::MinimumGapBetween { limit } => BucketRuleKind::MinimumGapBetween {
+                limit: as_i64(limit),
+            },
+            DayRuleKind::FreeRunWithin {
+                start_offset,
+                end_offset,
+                min_run,
+            } => BucketRuleKind::FreeRunWithin {
+                start_offset,
+                end_offset,
+                min_run: as_i64(min_run),
+            },
+            DayRuleKind::MaximumAtOffsets {
+                start_offset,
+                end_offset,
+                limit,
+            } => BucketRuleKind::MaximumAtOffsets {
+                start_offset,
+                end_offset,
+                limit: as_i64(limit),
+            },
+        };
+        let constraint = Arc::new(BucketRule::new(Track::new(tasks, day_ranges.clone()), kind));
+        match &rule.penalty {
+            None => {
+                let id = builder.add_constraint(constraint);
+                constraint_entities.insert(id, rule.entity);
+            }
+            Some(penalty) => add_penalty(&mut builder, penalty, constraint),
+        }
+    }
+    for rule in &problem.distinct_per_bucket {
+        if rule.groups.len() as u64 <= rule.limit {
+            continue;
+        }
+        let tasks: Vec<(BucketedTask, usize)> = rule
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(key, group)| {
+                group
+                    .iter()
+                    .filter_map(|id| variables.get(id))
+                    .map(move |&(start, _)| (BucketedTask::new(start, 1, 1), key))
+            })
+            .collect();
+        let constraint = Arc::new(DistinctPerBucket::new(
+            tasks,
+            day_ranges.clone(),
+            usize::try_from(rule.limit).unwrap_or(usize::MAX),
+        ));
+        match &rule.penalty {
+            None => {
+                builder.add_constraint(constraint);
+            }
+            Some(penalty) => add_penalty(&mut builder, penalty, constraint),
+        }
+    }
+    for goal in &problem.isolated_block_goals {
+        let tasks = tasks_for(goal.entity);
+        if tasks.is_empty() {
+            continue;
+        }
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(IsolatedBlockObjective::new(
+                Track::new(tasks, day_ranges.clone()),
+                goal.split_offset,
+                as_i64(goal.max_units),
+                goal.weight,
+            )),
+        );
+    }
+    for goal in &problem.joint_presence_goals {
+        let anchor = tasks_for(goal.anchor);
+        if anchor.is_empty() {
+            continue;
+        }
+        // Gemeinsam ist eine Aufgabe, die beide haben — dieselbe Startvariable —, anwesend, wenn
+        // beide es sind.
+        let companion = tasks_for(goal.companion);
+        let joint: Vec<JointTask> = anchor
+            .iter()
+            .filter_map(|task| {
+                let other = companion.iter().find(|other| other.start == task.start)?;
+                Some(JointTask {
+                    start: task.start,
+                    presences: task.presence.into_iter().chain(other.presence).collect(),
+                })
+            })
+            .collect();
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(JointPresenceObjective::new(
+                Track::new(anchor, day_ranges.clone()),
+                joint,
+                goal.weight,
+            )),
+        );
+    }
+    for goal in &problem.concurrent_free_goals {
+        let tracks: Vec<Track> = goal
+            .entities
+            .iter()
+            .map(|&entity| tasks_for(entity))
+            .filter(|tasks| !tasks.is_empty())
+            .map(|tasks| Track::new(tasks, day_ranges.clone()))
+            .collect();
+        if tracks.len() as u64 <= goal.limit {
+            continue;
+        }
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(ConcurrentFreeObjective::new(
+                tracks,
+                goal.start_offset,
+                goal.end_offset,
+                as_i64(goal.limit),
+                goal.weight,
+            )),
+        );
+    }
+
+    // Distribution goals over sets of activities (plan 69, package B).
+    let goal_task = |id: &ActivityId, group: usize| {
+        let &(start, _) = variables.get(id)?;
+        let activity = expanded_activities.iter().find(|a| a.id() == *id)?;
+        Some(GoalTask {
+            start,
+            duration: duration_as_i64(activity.duration()),
+            group,
+        })
+    };
+    for goal in &problem.activity_goals {
+        let flat = |ids: &[ActivityId]| -> Vec<GoalTask> {
+            ids.iter()
+                .enumerate()
+                .filter_map(|(index, id)| goal_task(id, index))
+                .collect()
+        };
+        let (tasks, shape) = match &goal.kind {
+            ActivityGoalKind::NotOnAdjacentBuckets { activities } => {
+                (flat(activities), ActivityGoalShape::NotOnAdjacentBuckets)
+            }
+            ActivityGoalKind::OffsetVariety { activities } => {
+                (flat(activities), ActivityGoalShape::OffsetVariety)
+            }
+            ActivityGoalKind::OffsetStability { activities } => {
+                (flat(activities), ActivityGoalShape::OffsetStability)
+            }
+            ActivityGoalKind::StartsWithinOffsets {
+                activities,
+                start_offset,
+                end_offset,
+                min,
+                max,
+            } => (
+                flat(activities),
+                ActivityGoalShape::StartsWithinOffsets {
+                    start_offset: *start_offset,
+                    end_offset: *end_offset,
+                    min: as_i64(*min),
+                    max: as_i64(*max),
+                },
+            ),
+            ActivityGoalKind::Proximity { groups, mode } => (
+                groups
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(group, ids)| ids.iter().filter_map(move |id| goal_task(id, group)))
+                    .collect(),
+                ActivityGoalShape::Proximity {
+                    mode: match mode {
+                        ProximityMode::AvoidAdjacent => Proximity::AvoidAdjacent,
+                        ProximityMode::AvoidSameBucket => Proximity::AvoidSameBucket,
+                        ProximityMode::PreferAdjacent => Proximity::PreferAdjacent,
+                    },
+                },
+            ),
+            ActivityGoalKind::BlockAtEdges {
+                activities,
+                min_length,
+                edges,
+            } => (
+                flat(activities),
+                ActivityGoalShape::BlockAtEdges {
+                    min_length: as_i64(*min_length),
+                    edges: edges.clone(),
+                },
+            ),
+        };
+        if tasks.len() < 2 && !matches!(shape, ActivityGoalShape::StartsWithinOffsets { .. }) {
+            continue;
+        }
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(ActivityGoalObjective::new(
+                tasks,
+                day_ranges.clone(),
+                shape,
+                goal.weight,
+            )),
+        );
+    }
+
+    // Resource costs and room changes (plan 69, package C).
+    let room_options = |id: &ActivityId| -> RoomOptions {
+        let mut options: RoomOptions = fixed_resources
+            .get(id)
+            .into_iter()
+            .flatten()
+            .map(|resource| (*resource, None))
+            .collect();
+        options.extend(
+            selected_resources
+                .get(id)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|(resource, presence)| (*resource, Some(*presence))),
+        );
+        options
+    };
+    for goal in &problem.resource_cost_goals {
+        let tasks: Vec<RoomOptions> = goal
+            .activities
+            .iter()
+            .map(&room_options)
+            .filter(|options| !options.is_empty())
+            .collect();
+        if tasks.is_empty() {
+            continue;
+        }
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(ResourceCostObjective::new(
+                tasks,
+                goal.costs.iter().copied().collect(),
+                goal.default_cost,
+                goal.weight,
+            )),
+        );
+    }
+    for goal in &problem.room_change_goals {
+        let starts: HashMap<VariableId, ActivityId> = variables
+            .iter()
+            .map(|(id, &(start, _))| (start, *id))
+            .collect();
+        let tasks: Vec<RoomTask> = tasks_for(goal.entity)
+            .into_iter()
+            .filter_map(|task| {
+                let id = starts.get(&task.start)?;
+                Some(RoomTask {
+                    start: task.start,
+                    duration: task.duration,
+                    presence: task.presence,
+                    rooms: room_options(id),
+                })
+            })
+            .collect();
+        if tasks.len() < 2 {
+            continue;
+        }
+        builder.add_scored_objective(
+            &goal.category,
+            score_level(goal.level),
+            Arc::new(RoomChangeObjective::new(
+                tasks,
+                day_ranges.clone(),
+                goal.locations.iter().copied().collect(),
+                goal.travel_gap,
+                goal.change_weight,
+                goal.travel_weight,
+            )),
+        );
+    }
+
+    // Time preferences: occupancy of one entity measured against valued windows.
+    for preference in &problem.time_preferences {
+        if preference.windows.is_empty() {
+            continue;
+        }
+        let tasks = load_tasks_for(
+            problem,
+            &expanded_activities,
+            &variables,
+            &fixed_resources,
+            &fixed_participants,
+            &selected_resources,
+            &selected_participants,
+            preference.entity,
+        );
+        if tasks.is_empty() {
+            continue;
+        }
+        builder.add_scored_objective(
+            &preference.category,
+            score_level(preference.level),
+            Arc::new(TimePreferenceObjective::new(tasks, &preference.windows)),
         );
     }
 
@@ -1615,6 +2025,67 @@ fn validate_input(problem: &SchedulingProblem) -> Vec<String> {
                 "maximum daily load must reference a resource or participant, not activity {activity}"
             )),
             _ => {}
+        }
+    }
+    // Plan 69, package A: every entity a day rule or goal names must exist.
+    let mut named: Vec<(EntityRef, &str)> = Vec::new();
+    named.extend(
+        problem
+            .day_rules
+            .iter()
+            .map(|rule| (rule.entity, "day rule")),
+    );
+    named.extend(
+        problem
+            .isolated_block_goals
+            .iter()
+            .map(|goal| (goal.entity, "isolated block goal")),
+    );
+    for goal in &problem.joint_presence_goals {
+        named.push((goal.anchor, "joint presence goal"));
+        named.push((goal.companion, "joint presence goal"));
+    }
+    for goal in &problem.concurrent_free_goals {
+        named.extend(
+            goal.entities
+                .iter()
+                .map(|&entity| (entity, "concurrent free goal")),
+        );
+    }
+    for (entity, label) in named {
+        match entity {
+            EntityRef::Resource(resource) if !resource_ids.contains_key(&resource) => {
+                errors.push(format!("{label} references unknown resource {resource}"));
+            }
+            EntityRef::Participant(participant) if !participant_ids.contains(&participant) => {
+                errors.push(format!(
+                    "{label} references unknown participant {participant}"
+                ));
+            }
+            EntityRef::Activity(activity) => errors.push(format!(
+                "{label} must reference a resource or participant, not activity {activity}"
+            )),
+            _ => {}
+        }
+    }
+    for preference in &problem.time_preferences {
+        match preference.entity {
+            EntityRef::Resource(resource) if !resource_ids.contains_key(&resource) => errors.push(
+                format!("time preference references unknown resource {resource}"),
+            ),
+            EntityRef::Participant(participant) if !participant_ids.contains(&participant) => {
+                errors.push(format!(
+                    "time preference references unknown participant {participant}"
+                ));
+            }
+            _ => {}
+        }
+        if preference
+            .windows
+            .iter()
+            .any(|(window, _)| window.end < window.start)
+        {
+            errors.push("time preference window ends before it starts".to_string());
         }
     }
     for minimum_break in &problem.minimum_breaks {
@@ -2575,7 +3046,12 @@ fn load_tasks_for(
                     tasks.push(BucketedTask::new(start, duration, 1).with_presence(presence));
                 }
             }
-            EntityRef::Activity(_) => {}
+            // Only the time preferences name an activity: its own occupancy (plan 69).
+            EntityRef::Activity(id) => {
+                if activity.id() == id {
+                    tasks.push(BucketedTask::new(start, duration, 1));
+                }
+            }
         }
     }
     tasks
@@ -2865,6 +3341,16 @@ fn activities_by_name<T>(
     groups.into_values().collect()
 }
 
+/// Adds `constraint` as a preference: its violation count, times the penalty's weight, is scored
+/// under the penalty's category and level instead of ruling assignments out.
+fn add_penalty(builder: &mut ModelBuilder, penalty: &SoftPenalty, constraint: Arc<dyn Constraint>) {
+    builder.add_scored_objective(
+        &penalty.category,
+        score_level(penalty.level),
+        Arc::new(ConstraintPenalty::new(constraint, penalty.weight)),
+    );
+}
+
 /// Penalty of `amount` scaled by `weight`, expressed as a soft-score contribution (never positive
 /// for a non-negative weight, since solvers maximise the soft score).
 fn soft_penalty(weight: i64, amount: i64) -> i64 {
@@ -2896,6 +3382,18 @@ fn track_idle(
     ranges: &[BucketRange],
     assignment: &HashMap<VariableId, i64>,
 ) -> i64 {
+    track_gaps(track, ranges, assignment)
+        .into_iter()
+        .fold(0i64, i64::saturating_add)
+}
+
+/// The free stretches between a track's assignments, one entry per gap, inside each bucket — the
+/// time before the first and after the last assignment of a bucket is not a gap.
+fn track_gaps(
+    track: &[BucketedTask],
+    ranges: &[BucketRange],
+    assignment: &HashMap<VariableId, i64>,
+) -> Vec<i64> {
     let mut per_bucket: BTreeMap<usize, Vec<(i64, i64)>> = BTreeMap::new();
     for task in track {
         if let Some(presence) = task.presence
@@ -2914,18 +3412,73 @@ fn track_idle(
             .or_default()
             .push((start, start.saturating_add(task.duration)));
     }
-    let mut idle = 0i64;
+    let mut gaps = Vec::new();
     for intervals in per_bucket.values_mut() {
         intervals.sort_unstable();
         let mut cursor = intervals[0].1;
         for &(start, end) in &intervals[1..] {
             if start > cursor {
-                idle = idle.saturating_add(start - cursor);
+                gaps.push(start - cursor);
             }
             cursor = cursor.max(end);
         }
     }
-    idle
+    gaps
+}
+
+/// One entity's free time held inside `[min, max]`, plus a cost for every long gap
+/// ([`IdleBounds`]).
+#[derive(Debug)]
+struct IdleBoundsObjective {
+    track: Vec<BucketedTask>,
+    ranges: Vec<BucketRange>,
+    rule: IdleBounds,
+    scope: Vec<VariableId>,
+}
+
+impl IdleBoundsObjective {
+    fn new(track: Vec<BucketedTask>, ranges: Vec<BucketRange>, rule: IdleBounds) -> Self {
+        let mut scope: Vec<VariableId> = track
+            .iter()
+            .flat_map(|task| std::iter::once(task.start).chain(task.presence))
+            .collect();
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            track,
+            ranges,
+            rule,
+            scope,
+        }
+    }
+}
+
+impl Objective for IdleBoundsObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let gaps = track_gaps(&self.track, &self.ranges, assignment);
+        let total = gaps.iter().copied().fold(0i64, i64::saturating_add);
+        let min = i64::try_from(self.rule.min).unwrap_or(i64::MAX);
+        let max = i64::try_from(self.rule.max).unwrap_or(i64::MAX);
+        let outside = (total - max).max(0).saturating_add((min - total).max(0));
+        let long = gaps
+            .iter()
+            .filter(|&&gap| gap >= self.rule.long_gap)
+            .count() as i64;
+        soft_penalty(self.rule.weight, outside)
+            .saturating_add(soft_penalty(self.rule.long_gap_weight, long))
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        soft_optimistic_bound(self.rule.weight.min(self.rule.long_gap_weight))
+    }
 }
 
 /// Minimises free time between a participant's (or a group's aggregated) assignments.
@@ -3109,6 +3662,108 @@ impl Objective for SpreadObjective {
 
     fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
         soft_optimistic_bound(self.weight)
+    }
+}
+
+/// Scores one entity's occupancy against valued windows ([`TimePreference`]).
+///
+/// The windows are folded into a prefix sum over their span once, so a task's contribution is
+/// two lookups whatever the number of windows. Memory is one entry per time unit of the span.
+#[derive(Debug)]
+struct TimePreferenceObjective {
+    tasks: Vec<BucketedTask>,
+    /// First time value the prefix covers.
+    origin: i64,
+    /// `prefix[i]` is the summed value of `[origin, origin + i)`.
+    prefix: Vec<i64>,
+    /// Never-underestimating bound: every occupied unit in the best window.
+    bound: i64,
+    scope: Vec<VariableId>,
+}
+
+impl TimePreferenceObjective {
+    fn new(tasks: Vec<BucketedTask>, windows: &[(TimeWindow, i64)]) -> Self {
+        let origin = windows.iter().map(|(w, _)| w.start).min().unwrap_or(0);
+        let end = windows.iter().map(|(w, _)| w.end).max().unwrap_or(origin);
+        let span = usize::try_from(end.saturating_sub(origin)).unwrap_or(0);
+        let mut per_unit = vec![0i64; span];
+        for (window, value) in windows {
+            let from = usize::try_from(window.start - origin).unwrap_or(0);
+            let to = usize::try_from(window.end - origin).unwrap_or(0).min(span);
+            for unit in per_unit.iter_mut().take(to).skip(from) {
+                *unit = unit.saturating_add(*value);
+            }
+        }
+        let mut prefix = Vec::with_capacity(span + 1);
+        prefix.push(0i64);
+        for unit in &per_unit {
+            prefix.push(prefix.last().copied().unwrap_or(0).saturating_add(*unit));
+        }
+        let best = per_unit.iter().copied().max().unwrap_or(0).max(0);
+        let bound = tasks.iter().fold(0i64, |acc, task| {
+            acc.saturating_add(
+                best.saturating_mul(task.duration)
+                    .saturating_mul(task.demand),
+            )
+        });
+        let mut scope: Vec<VariableId> = tasks
+            .iter()
+            .flat_map(|task| std::iter::once(task.start).chain(task.presence))
+            .collect();
+        scope.sort_unstable();
+        scope.dedup();
+        Self {
+            tasks,
+            origin,
+            prefix,
+            bound,
+            scope,
+        }
+    }
+
+    /// Summed value of `[from, to)`, clipped to the span.
+    fn value_between(&self, from: i64, to: i64) -> i64 {
+        let last = self.prefix.len() as i64 - 1;
+        let from = (from - self.origin).clamp(0, last);
+        let to = (to - self.origin).clamp(0, last);
+        if to <= from {
+            return 0;
+        }
+        self.prefix[to as usize] - self.prefix[from as usize]
+    }
+}
+
+impl Objective for TimePreferenceObjective {
+    fn name(&self) -> &str {
+        SOFT_GOAL_OBJECTIVE_NAME
+    }
+
+    fn scope(&self) -> &[VariableId] {
+        &self.scope
+    }
+
+    fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
+        let mut total = 0i64;
+        for task in &self.tasks {
+            if task
+                .presence
+                .is_some_and(|presence| assignment.get(&presence) != Some(&1))
+            {
+                continue;
+            }
+            let Some(&start) = assignment.get(&task.start) else {
+                continue;
+            };
+            total = total.saturating_add(
+                self.value_between(start, start.saturating_add(task.duration))
+                    .saturating_mul(task.demand),
+            );
+        }
+        total
+    }
+
+    fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
+        self.bound
     }
 }
 

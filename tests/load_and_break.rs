@@ -6,9 +6,64 @@
 use schedulr::{
     AcademicPeriod, Activity, ActivityId, DayTemplate, MaximumDailyLoad, MinimumBreak, Participant,
     ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement, Resource,
-    ResourceId, ResourceRequirement, ScheduleTemplate, SchedulingProblem, SlotTemplate,
-    SolveStatus, TimeWindow, compile,
+    ResourceId, ResourceRequirement, ScheduleTemplate, SchedulingProblem, ScoreLevel, SlotTemplate,
+    SoftPenalty, SolveStatus, TimeWindow, compile,
 };
+
+/// As a preference, the same over-limit input that is infeasible as a rule solves — and every
+/// unit over the limit is charged to the penalty's category.
+#[test]
+fn a_soft_daily_load_charges_the_excess_instead_of_failing() {
+    let teacher = Participant::new(ParticipantId(1), "Teacher");
+    let lessons: Vec<Activity> = (1..=3)
+        .map(|id| {
+            Activity::new(ActivityId(id), format!("l{id}"), TimeWindow::new(0, 3), 1)
+                .with_participant(teacher.id())
+        })
+        .collect();
+    let problem = SchedulingProblem::new(vec![], vec![teacher.clone()], lessons)
+        .with_maximum_daily_load(
+            MaximumDailyLoad::for_participant(teacher.id(), 1).soft(SoftPenalty::new(
+                "Tageslast",
+                ScoreLevel::Medium,
+                4,
+            )),
+        );
+
+    let result = compile(&problem).unwrap().solve();
+    assert_eq!(result.status, SolveStatus::Feasible);
+    let solution = result.solution.expect("a preference never blocks a plan");
+    assert_eq!(solution.score.hard, 0);
+    let charged: i64 = solution
+        .score_components
+        .iter()
+        .filter(|component| component.category == "Tageslast")
+        .map(|component| component.value)
+        .sum();
+    assert_eq!(charged, -8, "two units over a limit of 1, at weight 4");
+}
+
+/// Where the preference can be met, the solver meets it: two lessons on two days.
+#[test]
+fn a_soft_daily_load_still_spreads_when_it_can() {
+    let teacher = Participant::new(ParticipantId(1), "Teacher");
+    let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 7), 1)
+        .with_participant(teacher.id());
+    let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 7), 1)
+        .with_participant(teacher.id());
+    let problem = SchedulingProblem::new(vec![], vec![teacher], vec![first, second])
+        .with_calendar(period(0, 7), two_day_template())
+        .with_maximum_daily_load(
+            MaximumDailyLoad::for_participant(ParticipantId(1), 1).soft(SoftPenalty::new(
+                "Tageslast",
+                ScoreLevel::Medium,
+                1,
+            )),
+        );
+
+    let solution = compile(&problem).unwrap().solve().solution.unwrap();
+    assert_eq!(solution.score.medium, 0, "one lesson per day costs nothing");
+}
 
 /// Two "days" within a 10-unit cycle: day 0 covers `[0, 5)`, day 1 covers `[5, 10)`.
 fn two_day_template() -> ScheduleTemplate {

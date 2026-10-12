@@ -324,13 +324,14 @@ impl InternalCompiled {
     }
 
     /// Verbindet Aktivitäten über `SameStart` und `FixedOffset` zu Einheiten mit festen Abständen.
+    /// Nur harte Relationen: eine gewünschte Gleichzeitigkeit darf die Suche auch aufgeben.
     fn units(
         &self,
         problem: &SchedulingProblem,
         allowed: &BTreeMap<ActivityId, Vec<i64>>,
     ) -> Vec<Unit> {
         let mut edges: HashMap<ActivityId, Vec<(ActivityId, i64)>> = HashMap::new();
-        for relation in &problem.relations {
+        for relation in problem.relations.iter().filter(|r| r.penalty.is_none()) {
             let offset = match relation.relation {
                 ActivityRelation::SameStart => 0,
                 ActivityRelation::FixedOffset { offset } => offset,

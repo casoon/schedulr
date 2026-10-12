@@ -1,6 +1,6 @@
 use crate::{
-    ActivityId, Assignment, CompiledProblem, Conflict, ConflictSeverity, EntityRef, ResourceId,
-    Score, ScoreComponent, Solution, TimeWindow,
+    ActivityId, Assignment, CompiledProblem, Conflict, ConflictSeverity, EntityRef, ParticipantId,
+    ResourceId, Score, ScoreComponent, Solution, TimeWindow,
 };
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -46,6 +46,20 @@ pub enum ChangeRequest {
     Swap {
         first: ActivityId,
         second: ActivityId,
+    },
+    /// Puts `activity` into resource `to` instead of `from`; `to` must be a candidate of the
+    /// requirement `from` currently fills. The time stays.
+    ReplaceResource {
+        activity: ActivityId,
+        from: ResourceId,
+        to: ResourceId,
+    },
+    /// Hands `activity` from participant `from` to `to`; `to` must be a candidate of the same
+    /// participant requirement. The time stays.
+    ReplaceParticipant {
+        activity: ActivityId,
+        from: ParticipantId,
+        to: ParticipantId,
     },
 }
 
@@ -314,8 +328,90 @@ impl CompiledProblem {
             .map(|assignment| (assignment.activity, assignment.window))
             .collect::<BTreeMap<_, _>>();
         let mut updates: Vec<(VariableId, i64)> = Vec::new();
+        // Resource and participant replacements are applied to a copy of the solution first; the
+        // selection variables they flip become ordinary updates below.
+        let mut working = solution.clone();
+        for change in changes {
+            match change {
+                ChangeRequest::ReplaceResource { activity, from, to } => {
+                    let candidate_of_same_slot = self
+                        .internal
+                        .selected_resources
+                        .get(activity)
+                        .is_some_and(|slots| {
+                            slots.iter().any(|slot| {
+                                slot.iter().any(|(resource, _)| resource == from)
+                                    && slot.iter().any(|(resource, _)| resource == to)
+                            })
+                        });
+                    let Some(assignment) = working
+                        .assignments
+                        .iter_mut()
+                        .find(|assignment| assignment.activity == *activity)
+                    else {
+                        return invalid_change(*activity, "unknown activity", solution);
+                    };
+                    if !candidate_of_same_slot || !assignment.resources.contains(from) {
+                        return invalid_change(
+                            *activity,
+                            "the new resource is not a candidate of the replaced one's requirement",
+                            solution,
+                        );
+                    }
+                    for resource in &mut assignment.resources {
+                        if resource == from {
+                            *resource = *to;
+                        }
+                    }
+                }
+                ChangeRequest::ReplaceParticipant { activity, from, to } => {
+                    let candidate = self
+                        .internal
+                        .selected_participants
+                        .get(activity)
+                        .is_some_and(|candidates| {
+                            candidates
+                                .iter()
+                                .any(|(participant, _)| participant == from)
+                                && candidates.iter().any(|(participant, _)| participant == to)
+                        });
+                    let Some(assignment) = working
+                        .assignments
+                        .iter_mut()
+                        .find(|assignment| assignment.activity == *activity)
+                    else {
+                        return invalid_change(*activity, "unknown activity", solution);
+                    };
+                    if !candidate || !assignment.participants.contains(from) {
+                        return invalid_change(
+                            *activity,
+                            "the new participant is not a candidate of the requirement",
+                            solution,
+                        );
+                    }
+                    for participant in &mut assignment.participants {
+                        if participant == from {
+                            *participant = *to;
+                        }
+                    }
+                }
+                ChangeRequest::Move { .. } | ChangeRequest::Swap { .. } => {}
+            }
+        }
+        if working != *solution {
+            let target = self.internal.assignment_map(&working);
+            for (variable, value) in target.iter() {
+                if committed.get(variable) != Some(value) {
+                    updates.push((*variable, *value));
+                }
+            }
+        }
         for change in changes {
             let (activity, window) = match change {
+                ChangeRequest::ReplaceResource { .. }
+                | ChangeRequest::ReplaceParticipant { .. } => {
+                    continue;
+                }
                 ChangeRequest::Move { activity, window } => (*activity, *window),
                 ChangeRequest::Swap { first, second } => {
                     let (Some(first_window), Some(second_window)) =
@@ -367,7 +463,7 @@ impl CompiledProblem {
         let new_score = self.internal.score_for(&committed);
         let score_components = self.internal.score_components(&committed);
         let candidate = Solution {
-            assignments: solution
+            assignments: working
                 .assignments
                 .iter()
                 .map(|assignment| {

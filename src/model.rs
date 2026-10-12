@@ -534,6 +534,13 @@ impl Activity {
         self
     }
 
+    /// Replaces the window the activity may be placed in — e.g. pinning it to the start it has in
+    /// an earlier solution, so that only its resources are chosen anew.
+    pub fn with_allowed_window(mut self, window: TimeWindow) -> Self {
+        self.allowed_window = window;
+        self
+    }
+
     pub fn with_participant_group(mut self, group: ParticipantGroupId) -> Self {
         self.participant_groups.push(group);
         self
@@ -950,12 +957,15 @@ pub enum ActivityRelation {
 }
 
 /// Ties two activities together with an [`ActivityRelation`]. Unlike [`ScoreRule`], this is a
-/// hard constraint: the solver never produces a solution that violates it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// hard constraint: the solver never produces a solution that violates it — unless it carries a
+/// [`SoftPenalty`] (see [`Self::soft`]), which makes a broken relation cost the penalty's weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityRelationConstraint {
     pub first: ActivityId,
     pub second: ActivityId,
     pub relation: ActivityRelation,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl ActivityRelationConstraint {
@@ -964,7 +974,14 @@ impl ActivityRelationConstraint {
             first,
             second,
             relation,
+            penalty: None,
         }
+    }
+
+    /// Turns the rule into a preference: each counted violation costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 }
 
@@ -988,6 +1005,30 @@ pub struct Recurrence {
     pub instances: Vec<(u32, ActivityId)>,
 }
 
+/// What breaking a rule costs when the caller makes it a preference instead of a hard rule.
+///
+/// The rule's own violation count — the excess over a cap, the distance to an allowed shape — is
+/// multiplied by `weight` and reported under `category` at `level` in
+/// [`Solution::score_components`], exactly like a [`SoftGoal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftPenalty {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    /// Cost per counted violation (non-negative by convention).
+    pub weight: i64,
+}
+
+impl SoftPenalty {
+    pub fn new(category: impl Into<String>, level: ScoreLevel, weight: i64) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            weight,
+        }
+    }
+}
+
 /// Hard cap on the total occupied duration one entity may accumulate inside a single period
 /// bucket (e.g. one day): "sum of occupied duration per resource/participant and period bucket <=
 /// limit".
@@ -997,17 +1038,32 @@ pub struct Recurrence {
 /// limit is applied separately to each entity's assignments: a resource counts the activities that
 /// require it (weighted by the requirement's units), a participant counts the activities it
 /// attends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// With a [`SoftPenalty`] (see [`Self::soft`]) the cap becomes a preference: every unit over the
+/// limit costs the penalty's weight instead of ruling the assignment out.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaximumDailyLoad {
     /// Resource or participant the limit applies to.
     pub entity: EntityRef,
     /// Maximum occupied duration per bucket.
     pub limit: u64,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl MaximumDailyLoad {
     pub const fn new(entity: EntityRef, limit: u64) -> Self {
-        Self { entity, limit }
+        Self {
+            entity,
+            limit,
+            penalty: None,
+        }
+    }
+
+    /// Turns the cap into a preference: each unit over the limit costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 
     pub const fn for_resource(resource: ResourceId, limit: u64) -> Self {
@@ -1106,12 +1162,18 @@ impl ParticipantChoiceGroup {
 /// The buckets themselves come from the [`ScheduleTemplate`] (see `load_bucket_ranges`), so
 /// schedulr never learns what a "day" or "week" is — the caller supplies the context.
 /// An empty `allowed` list means "no pattern chosen", and the rule simply does not apply.
+///
+/// With a [`SoftPenalty`] (see [`Self::soft`]) the shape becomes a preference: the cost is the
+/// penalty's weight times the distance to the nearest allowed shape — how many units would have to
+/// move between blocks to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketLoadPattern {
     /// The activities this pattern constrains, e.g. all occurrences of one course.
     pub activities: Vec<ActivityId>,
     /// Allowed block multisets, e.g. `[[2, 1, 1], [1, 1, 1, 1]]`.
     pub allowed: Vec<Vec<u64>>,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl BucketLoadPattern {
@@ -1119,7 +1181,15 @@ impl BucketLoadPattern {
         Self {
             activities,
             allowed,
+            penalty: None,
         }
+    }
+
+    /// Turns the shape into a preference: each unit of distance to the nearest allowed shape costs
+    /// `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 
     /// Whether the rule applies at all — a pattern without activities or without an allowed
@@ -1200,17 +1270,32 @@ pub fn matches_bucket_load_pattern(
 /// Counts activities, not occupied time: a two-unit block counts once, which is what separates
 /// this from [`MaximumDailyLoad`]. The buckets are the schedule template's own (see
 /// [`bucket_windows`]), so what a bucket means stays the caller's business.
+///
+/// With a [`SoftPenalty`] (see [`Self::soft`]) every start over the limit costs the penalty's
+/// weight instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaximumBucketStarts {
     /// The activities counted together, e.g. all occurrences of one course.
     pub activities: Vec<ActivityId>,
     /// How many of them may start in the same bucket.
     pub limit: u64,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl MaximumBucketStarts {
     pub fn new(activities: Vec<ActivityId>, limit: u64) -> Self {
-        Self { activities, limit }
+        Self {
+            activities,
+            limit,
+            penalty: None,
+        }
+    }
+
+    /// Turns the rule into a preference: each counted violation costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 }
 
@@ -1218,17 +1303,32 @@ impl MaximumBucketStarts {
 ///
 /// Asks *whether* anything of the entity lies in a bucket, not how much: which buckets stay free
 /// is left to the search, which is what separates it from blocking fixed windows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// With a [`SoftPenalty`] (see [`Self::soft`]) every bucket over the limit costs the penalty's
+/// weight instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaximumActiveBuckets {
     /// Resource or participant the limit applies to.
     pub entity: EntityRef,
     /// How many buckets it may be active in.
     pub limit: u64,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl MaximumActiveBuckets {
     pub const fn new(entity: EntityRef, limit: u64) -> Self {
-        Self { entity, limit }
+        Self {
+            entity,
+            limit,
+            penalty: None,
+        }
+    }
+
+    /// Turns the rule into a preference: each counted violation costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 
     pub const fn for_participant(participant: ParticipantId, limit: u64) -> Self {
@@ -1272,6 +1372,325 @@ impl ConsecutiveRunLimit {
     }
 }
 
+/// What a [`DayRule`] asks of one entity's occupancy, measured on the concrete bucket windows
+/// (Monday of week A and Monday of week B are two days). A bucket is *active* when the entity
+/// occupies anything in it. Offsets count from the start of each bucket window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayRuleKind {
+    /// At least `limit` occupied units in every active bucket — "no day for a single lesson".
+    MinimumLoad { limit: u64 },
+    /// At most `limit` units from the first start to the last end in every bucket — the longest
+    /// day someone has to be present, free periods included.
+    MaximumSpan { limit: u64 },
+    /// At least `limit` free units between two consecutive active buckets: from the last end to
+    /// the end of the earlier window plus from the start of the later window to the first start —
+    /// "no late evening followed by an early morning".
+    MinimumGapBetween { limit: u64 },
+    /// A free run of at least `min_run` units inside `[start_offset, end_offset)` of every active
+    /// bucket — a lunch break somewhere in the lunch window.
+    FreeRunWithin {
+        start_offset: i64,
+        end_offset: i64,
+        min_run: u64,
+    },
+    /// At most `limit` occupied units, summed over all buckets, inside `[start_offset,
+    /// end_offset)` of each window — "the last morning period at most twice a week".
+    MaximumAtOffsets {
+        start_offset: i64,
+        end_offset: i64,
+        limit: u64,
+    },
+}
+
+/// A rule on the shape of one entity's occupancy inside each period bucket. Hard unless it
+/// carries a [`SoftPenalty`] (see [`Self::soft`]); then every unit it misses by costs the weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayRule {
+    /// Resource or participant whose occupancy is measured.
+    pub entity: EntityRef,
+    pub kind: DayRuleKind,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
+}
+
+impl DayRule {
+    pub fn new(entity: EntityRef, kind: DayRuleKind) -> Self {
+        Self {
+            entity,
+            kind,
+            penalty: None,
+        }
+    }
+
+    /// Turns the rule into a preference: each counted unit costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
+    }
+}
+
+/// At most `limit` distinct groups of activities start inside one period bucket — "at most five
+/// different subjects a day". Each inner list is one group, e.g. all lessons of one course.
+/// Hard unless it carries a [`SoftPenalty`]; then every group over the limit costs the weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaximumDistinctPerBucket {
+    pub groups: Vec<Vec<ActivityId>>,
+    pub limit: u64,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
+}
+
+impl MaximumDistinctPerBucket {
+    pub fn new(groups: Vec<Vec<ActivityId>>, limit: u64) -> Self {
+        Self {
+            groups,
+            limit,
+            penalty: None,
+        }
+    }
+
+    /// Turns the cap into a preference: each group over the limit costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
+    }
+}
+
+/// A lone block in one half of an active bucket costs `weight` — "nobody comes in for a single
+/// period in the afternoon". `split_offset` divides each bucket window into two halves; a half
+/// holding more than nothing but at most `max_units` occupied units counts as lone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolatedBlockGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    pub weight: i64,
+    pub entity: EntityRef,
+    pub split_offset: i64,
+    pub max_units: u64,
+}
+
+/// Every bucket in which `anchor` is active but shares no activity with `companion` costs
+/// `weight` — "the class teacher sees the class every day".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JointPresenceGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    pub weight: i64,
+    pub anchor: EntityRef,
+    pub companion: EntityRef,
+}
+
+/// More than `limit` of `entities` free at the same unit inside `[start_offset, end_offset)` of
+/// their active buckets costs `weight` per entity over the limit and unit — "not every class at
+/// lunch at once".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConcurrentFreeGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    pub weight: i64,
+    pub entities: Vec<EntityRef>,
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub limit: u64,
+}
+
+/// What the resources a set of activities uses cost — a ranking of fallback rooms, a home room,
+/// a room that fits the group's size. Every resource an activity uses (fixed or chosen from a
+/// pool) costs its entry in `costs`, an unlisted one `default_cost`, times `weight`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceCostGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    pub weight: i64,
+    pub activities: Vec<ActivityId>,
+    pub costs: Vec<(ResourceId, i64)>,
+    pub default_cost: i64,
+}
+
+/// Resource changes of one entity inside each bucket: every two consecutive activities in
+/// different resources cost `change_weight` — "fewer room changes for a teacher". When the two
+/// resources lie at different `locations` and less than `travel_gap` units separate the
+/// activities, that costs `travel_weight` on top — "time to walk to the annex".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomChangeGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    /// Resource or participant whose sequence of rooms is followed.
+    pub entity: EntityRef,
+    /// Location of a resource; resources without one never cause travel.
+    pub locations: Vec<(ResourceId, u32)>,
+    pub travel_gap: i64,
+    pub change_weight: i64,
+    pub travel_weight: i64,
+}
+
+/// How the activities of different groups of an [`ActivityGoalKind::Proximity`] should relate
+/// inside one bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProximityMode {
+    /// Directly back to back costs — "no two of these subjects in a row".
+    AvoidAdjacent,
+    /// Sharing a bucket at all costs — "not on the same day".
+    AvoidSameBucket,
+    /// Sharing a bucket without touching costs — "if on the same day, then back to back".
+    PreferAdjacent,
+}
+
+/// What an [`ActivityGoal`] measures. Offsets count from the start of each bucket window; a
+/// bucket is a concrete window (Monday of week A and of week B are two buckets).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityGoalKind {
+    /// Every pair of consecutive buckets that both see a start costs — "a two-period subject not on
+    /// consecutive days".
+    NotOnAdjacentBuckets { activities: Vec<ActivityId> },
+    /// Every start on an offset already taken by another costs — "not always in the same period".
+    OffsetVariety { activities: Vec<ActivityId> },
+    /// Every distinct offset beyond the first costs — "always in the same period".
+    OffsetStability { activities: Vec<ActivityId> },
+    /// The number of starts inside `[start_offset, end_offset)` should lie in `[min, max]`; every
+    /// start below or above costs — "at least once before the cut-off period".
+    StartsWithinOffsets {
+        activities: Vec<ActivityId>,
+        start_offset: i64,
+        end_offset: i64,
+        min: u64,
+        max: u64,
+    },
+    /// Pairs from **different** groups inside one bucket, judged by `mode`.
+    Proximity {
+        groups: Vec<Vec<ActivityId>>,
+        mode: ProximityMode,
+    },
+    /// Every contiguous block of at least `min_length` units that neither starts nor ends at the
+    /// bucket's start, its end or one of `edges` costs — "long blocks at the edge of a half day".
+    BlockAtEdges {
+        activities: Vec<ActivityId>,
+        min_length: u64,
+        edges: Vec<i64>,
+    },
+}
+
+/// A distribution goal over a set of activities; every counted unit costs `weight` at `level`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityGoal {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    pub weight: i64,
+    pub kind: ActivityGoalKind,
+}
+
+impl ActivityGoal {
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        weight: i64,
+        kind: ActivityGoalKind,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            weight,
+            kind,
+        }
+    }
+}
+
+/// Soft bounds on one entity's free time between its assignments — "two to four free periods a
+/// week, and no double free periods".
+///
+/// Free time is measured inside each period bucket, between the entity's first and last
+/// assignment there, and summed over all buckets. Every unit below `min` or above `max` costs
+/// `weight`; every single gap of at least `long_gap` units costs `long_gap_weight` on top. Unlike
+/// the global [`SoftGoalKind::MinimizeParticipantIdle`], this names one entity and a target band,
+/// so some free time can be wanted rather than merely tolerated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleBounds {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    /// Resource or participant whose free time is measured.
+    pub entity: EntityRef,
+    pub min: u64,
+    pub max: u64,
+    /// Cost per unit of free time outside `[min, max]`.
+    pub weight: i64,
+    /// A gap this long or longer counts as long.
+    pub long_gap: i64,
+    /// Cost per long gap; `0` ignores gap lengths.
+    pub long_gap_weight: i64,
+}
+
+impl IdleBounds {
+    /// Bounds without a long-gap cost; see [`Self::with_long_gaps`].
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        entity: EntityRef,
+        min: u64,
+        max: u64,
+        weight: i64,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            entity,
+            min,
+            max,
+            weight,
+            long_gap: 2,
+            long_gap_weight: 0,
+        }
+    }
+
+    /// Charges `weight` for every gap of at least `length` units.
+    pub fn with_long_gaps(mut self, length: i64, weight: i64) -> Self {
+        self.long_gap = length;
+        self.long_gap_weight = weight;
+        self
+    }
+}
+
+/// A soft preference of one entity for or against time windows — "rather not on Monday morning",
+/// "ideally the first two periods".
+///
+/// Every unit of time the entity occupies inside a window scores that window's `value`: positive
+/// values are wanted and raise the score, negative ones are unwanted and lower it. A resource
+/// counts its requirement's units, a participant counts once. Windows of one preference should
+/// not overlap; where they do, both values apply. Which windows exist — every day of every cycle
+/// week, say — is the caller's business: schedulr only measures occupancy against them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimePreference {
+    /// Stable category shown in [`Solution::score_components`].
+    pub category: String,
+    pub level: ScoreLevel,
+    /// Resource, participant or single activity whose occupancy is measured.
+    pub entity: EntityRef,
+    /// `(window, value per occupied unit)`.
+    pub windows: Vec<(TimeWindow, i64)>,
+}
+
+impl TimePreference {
+    pub fn new(
+        category: impl Into<String>,
+        level: ScoreLevel,
+        entity: EntityRef,
+        windows: Vec<(TimeWindow, i64)>,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            level,
+            entity,
+            windows,
+        }
+    }
+}
+
 /// Minimum distance between any two of an entity's assignments, e.g. a person-specific minimum
 /// break between two of their activities.
 ///
@@ -1279,12 +1698,17 @@ impl ConsecutiveRunLimit {
 /// constrains the relative placement of an entity's assignments. The distance is measured between
 /// the assignments' start values, so to require a real free gap the caller includes the earlier
 /// activity's duration in `min_distance`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// With a [`SoftPenalty`] (see [`Self::soft`]) every pair closer than `min_distance` costs the
+/// penalty's weight instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinimumBreak {
     /// Resource or participant the distance applies to.
     pub entity: EntityRef,
     /// Minimum distance between any two of the entity's assignment start values.
     pub min_distance: i64,
+    /// `None`: a hard rule. `Some`: a preference scored at the penalty's level.
+    pub penalty: Option<SoftPenalty>,
 }
 
 impl MinimumBreak {
@@ -1292,7 +1716,14 @@ impl MinimumBreak {
         Self {
             entity,
             min_distance,
+            penalty: None,
         }
+    }
+
+    /// Turns the rule into a preference: each counted violation costs `penalty.weight`.
+    pub fn soft(mut self, penalty: SoftPenalty) -> Self {
+        self.penalty = Some(penalty);
+        self
     }
 
     pub const fn for_resource(resource: ResourceId, min_distance: i64) -> Self {
@@ -1435,6 +1866,26 @@ pub struct SchedulingProblem {
     pub maximum_active_buckets: Vec<MaximumActiveBuckets>,
     /// Soft caps on how long a back-to-back run of a group's activities may get.
     pub consecutive_run_limits: Vec<ConsecutiveRunLimit>,
+    /// Soft preferences of one entity for or against time windows.
+    pub time_preferences: Vec<TimePreference>,
+    /// Soft bounds on one entity's free time between its assignments.
+    pub idle_bounds: Vec<IdleBounds>,
+    /// Rules on the shape of one entity's occupancy inside each period bucket.
+    pub day_rules: Vec<DayRule>,
+    /// Caps on how many distinct groups of activities start inside one period bucket.
+    pub distinct_per_bucket: Vec<MaximumDistinctPerBucket>,
+    /// Costs for a lone block in one part of an active period bucket.
+    pub isolated_block_goals: Vec<IsolatedBlockGoal>,
+    /// Costs for a bucket in which one entity is active without meeting another.
+    pub joint_presence_goals: Vec<JointPresenceGoal>,
+    /// Costs for too many entities being free at the same time.
+    pub concurrent_free_goals: Vec<ConcurrentFreeGoal>,
+    /// Distribution goals over sets of activities.
+    pub activity_goals: Vec<ActivityGoal>,
+    /// Costs for which resources a set of activities ends up using.
+    pub resource_cost_goals: Vec<ResourceCostGoal>,
+    /// Costs for resource changes and travel between locations of one entity.
+    pub room_change_goals: Vec<RoomChangeGoal>,
     /// Groups whose activities must select the same participant (plan 33.1).
     pub participant_choice_groups: Vec<ParticipantChoiceGroup>,
     pub soft_goals: Vec<SoftGoal>,
@@ -1466,6 +1917,16 @@ impl SchedulingProblem {
             maximum_bucket_starts: Vec::new(),
             maximum_active_buckets: Vec::new(),
             consecutive_run_limits: Vec::new(),
+            time_preferences: Vec::new(),
+            idle_bounds: Vec::new(),
+            day_rules: Vec::new(),
+            distinct_per_bucket: Vec::new(),
+            isolated_block_goals: Vec::new(),
+            joint_presence_goals: Vec::new(),
+            concurrent_free_goals: Vec::new(),
+            activity_goals: Vec::new(),
+            resource_cost_goals: Vec::new(),
+            room_change_goals: Vec::new(),
             participant_choice_groups: Vec::new(),
             soft_goals: Vec::new(),
             participant_conflict_policy: ParticipantConflictPolicy::default(),
@@ -1617,6 +2078,66 @@ impl SchedulingProblem {
     /// Adds a soft cap on back-to-back runs of a group of activities.
     pub fn with_consecutive_run_limit(mut self, rule: ConsecutiveRunLimit) -> Self {
         self.consecutive_run_limits.push(rule);
+        self
+    }
+
+    /// Adds a rule on the shape of one entity's occupancy inside each period bucket.
+    pub fn with_day_rule(mut self, rule: DayRule) -> Self {
+        self.day_rules.push(rule);
+        self
+    }
+
+    /// Adds a cap on how many distinct groups of activities start inside one period bucket.
+    pub fn with_distinct_per_bucket(mut self, rule: MaximumDistinctPerBucket) -> Self {
+        self.distinct_per_bucket.push(rule);
+        self
+    }
+
+    /// Adds a cost for a lone block in one part of an active period bucket.
+    pub fn with_isolated_block_goal(mut self, goal: IsolatedBlockGoal) -> Self {
+        self.isolated_block_goals.push(goal);
+        self
+    }
+
+    /// Adds a cost for a bucket in which one entity is active without meeting another.
+    pub fn with_joint_presence_goal(mut self, goal: JointPresenceGoal) -> Self {
+        self.joint_presence_goals.push(goal);
+        self
+    }
+
+    /// Adds a cost for too many entities being free at the same time.
+    pub fn with_concurrent_free_goal(mut self, goal: ConcurrentFreeGoal) -> Self {
+        self.concurrent_free_goals.push(goal);
+        self
+    }
+
+    /// Adds a cost for which resources a set of activities ends up using.
+    pub fn with_resource_cost_goal(mut self, goal: ResourceCostGoal) -> Self {
+        self.resource_cost_goals.push(goal);
+        self
+    }
+
+    /// Adds a cost for resource changes and travel between locations of one entity.
+    pub fn with_room_change_goal(mut self, goal: RoomChangeGoal) -> Self {
+        self.room_change_goals.push(goal);
+        self
+    }
+
+    /// Adds a distribution goal over a set of activities.
+    pub fn with_activity_goal(mut self, goal: ActivityGoal) -> Self {
+        self.activity_goals.push(goal);
+        self
+    }
+
+    /// Adds soft bounds on one entity's free time between its assignments.
+    pub fn with_idle_bounds(mut self, rule: IdleBounds) -> Self {
+        self.idle_bounds.push(rule);
+        self
+    }
+
+    /// Adds a soft preference of one entity for or against time windows.
+    pub fn with_time_preference(mut self, preference: TimePreference) -> Self {
+        self.time_preferences.push(preference);
         self
     }
 

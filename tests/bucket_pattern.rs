@@ -1,8 +1,55 @@
 use schedulr::{
     Activity, ActivityId, BucketLoadPattern, DayTemplate, ScheduleTemplate, SchedulingProblem,
-    SlotTemplate, SolveStatus, TimeWindow, bucket_load_blocks, bucket_load_pattern, bucket_windows,
-    compile, matches_bucket_load_pattern,
+    ScoreLevel, SlotTemplate, SoftPenalty, SolveStatus, TimeWindow, bucket_load_blocks,
+    bucket_load_pattern, bucket_windows, compile, matches_bucket_load_pattern,
 };
+
+/// As a preference, a shape that can never be met no longer makes the problem infeasible; the
+/// distance to it is charged instead. `[1, 1]` against the wanted `[2]` is two units off.
+#[test]
+fn a_soft_pattern_charges_the_distance_instead_of_failing() {
+    let mut problem = two_singles_on_separate_days(vec![vec![2]]);
+    problem.bucket_load_patterns[0].penalty =
+        Some(SoftPenalty::new("Doppelstunden", ScoreLevel::Weak, 3));
+
+    let result = compile(&problem).expect("the problem compiles").solve();
+    assert_eq!(result.status, SolveStatus::Feasible);
+    let solution = result.solution.expect("a preference never blocks a plan");
+    let charged: i64 = solution
+        .score_components
+        .iter()
+        .filter(|component| component.category == "Doppelstunden")
+        .map(|component| component.value)
+        .sum();
+    assert_eq!(charged, -6, "distance 2 to [2], at weight 3");
+}
+
+/// Where the shape fits, the preference shapes the plan just as the rule does.
+#[test]
+fn a_soft_pattern_still_places_two_periods_adjacent() {
+    let template = ScheduleTemplate::new(4).with_day(
+        DayTemplate::new(0)
+            .with_slot(SlotTemplate::new("s0", 0, 1))
+            .with_slot(SlotTemplate::new("s1", 1, 1))
+            .with_slot(SlotTemplate::new("s2", 2, 1))
+            .with_slot(SlotTemplate::new("s3", 3, 1)),
+    );
+    let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 4), 1);
+    let second = Activity::new(ActivityId(2), "second", TimeWindow::new(0, 4), 1);
+    let problem = SchedulingProblem::new(vec![], vec![], vec![first, second])
+        .with_schedule_template(template)
+        .with_bucket_load_pattern(
+            BucketLoadPattern::new(vec![ActivityId(1), ActivityId(2)], vec![vec![2]])
+                .soft(SoftPenalty::new("Doppelstunden", ScoreLevel::Weak, 1)),
+        );
+
+    let solution = compile(&problem)
+        .expect("the problem compiles")
+        .solve()
+        .solution
+        .expect("the day fits");
+    assert_eq!(solution.score.weak, 0, "the double period is met");
+}
 
 fn window(start: i64, end: i64) -> TimeWindow {
     TimeWindow::new(start, end)

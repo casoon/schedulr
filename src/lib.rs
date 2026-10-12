@@ -2,9 +2,11 @@
 
 mod active_buckets;
 mod batch;
+mod bucket_rules;
 mod construct;
 mod explain;
 mod model;
+mod pairwise_distance;
 mod repair;
 mod state;
 
@@ -14,18 +16,20 @@ pub use explain::{
     MoveEvaluation, SolutionComparison, Suggestion, compare,
 };
 pub use model::{
-    AbortReason, AcademicPeriod, Activity, ActivityId, ActivityRelation,
-    ActivityRelationConstraint, Assignment, BreakTemplate, BucketLoadPattern, BucketWindow,
-    CompileError, Conflict, ConflictSeverity, ConsecutiveRunLimit, DEFAULT_CAPACITY_DIMENSION,
-    DayTemplate, EntityRef, GroupMember, GroupMembership, MaximumActiveBuckets,
-    MaximumBucketStarts, MaximumDailyLoad, MinimumBreak, Participant, ParticipantChoiceGroup,
-    ParticipantConflictPolicy, ParticipantGroup, ParticipantGroupId, ParticipantId,
-    ParticipantPool, ParticipantPoolId, ParticipantRequirement, ProposedActivity, Recurrence,
-    Resource, ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement, ScheduleTemplate,
+    AbortReason, AcademicPeriod, Activity, ActivityGoal, ActivityGoalKind, ActivityId,
+    ActivityRelation, ActivityRelationConstraint, Assignment, BreakTemplate, BucketLoadPattern,
+    BucketWindow, CompileError, ConcurrentFreeGoal, Conflict, ConflictSeverity,
+    ConsecutiveRunLimit, DEFAULT_CAPACITY_DIMENSION, DayRule, DayRuleKind, DayTemplate, EntityRef,
+    GroupMember, GroupMembership, IdleBounds, IsolatedBlockGoal, JointPresenceGoal,
+    MaximumActiveBuckets, MaximumBucketStarts, MaximumDailyLoad, MaximumDistinctPerBucket,
+    MinimumBreak, Participant, ParticipantChoiceGroup, ParticipantConflictPolicy, ParticipantGroup,
+    ParticipantGroupId, ParticipantId, ParticipantPool, ParticipantPoolId, ParticipantRequirement,
+    ProposedActivity, ProximityMode, Recurrence, Resource, ResourceCostGoal, ResourceId,
+    ResourcePool, ResourcePoolId, ResourceRequirement, RoomChangeGoal, ScheduleTemplate,
     SchedulingProblem, Score, ScoreComponent, ScoreLevel, ScoreRule, ScoreRuleKind, SlotTemplate,
-    SoftGoal, SoftGoalKind, Solution, SolutionCheck, SolveResult, SolveStatistics, SolveStatus,
-    TimeWindow, bucket_load_blocks, bucket_load_pattern, bucket_windows,
-    matches_bucket_load_pattern,
+    SoftGoal, SoftGoalKind, SoftPenalty, Solution, SolutionCheck, SolveResult, SolveStatistics,
+    SolveStatus, TimePreference, TimeWindow, bucket_load_blocks, bucket_load_pattern,
+    bucket_windows, matches_bucket_load_pattern,
 };
 pub use repair::{RepairOptions, RepairOutcome, RepairResult};
 pub use state::SchedulingState;
