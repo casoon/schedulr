@@ -2186,6 +2186,50 @@ impl SelectedResourceCapacity {
         })
     }
 
+    /// How far the resource is overloaded, and which tasks take part. Every unit of demand
+    /// above capacity counts once, so two clashes cost more than one — what a local search
+    /// needs to tell a better assignment from a worse one inside an already broken resource.
+    /// The involved starts are those of tasks running while the resource is over capacity.
+    fn overload(&self, assignment: &HashMap<VariableId, i64>) -> (u32, Vec<VariableId>) {
+        // (time, delta, task): at equal times ends sort before starts, as in `overloaded`.
+        let mut events = Vec::with_capacity(self.tasks.len() * 2);
+        for (index, task) in self.tasks.iter().enumerate() {
+            if task
+                .presence
+                .is_some_and(|presence| assignment.get(&presence) != Some(&1))
+            {
+                continue;
+            }
+            let Some(&start) = assignment.get(&task.start) else {
+                continue;
+            };
+            let demand = i64::from(task.demand);
+            events.push((start, demand, index));
+            events.push((start.saturating_add(task.duration), -demand, index));
+        }
+        events.sort_unstable();
+        let capacity = i64::from(self.capacity);
+        let mut load = 0i64;
+        let mut active: Vec<usize> = Vec::new();
+        let mut excess = 0i64;
+        let mut involved: Vec<VariableId> = Vec::new();
+        for (_, delta, index) in events {
+            load = load.saturating_add(delta);
+            if delta < 0 {
+                active.retain(|&running| running != index);
+                continue;
+            }
+            active.push(index);
+            if delta > 0 && load > capacity {
+                excess = excess.saturating_add((load - capacity).min(delta));
+                involved.extend(active.iter().map(|&running| self.tasks[running].start));
+            }
+        }
+        involved.sort_unstable();
+        involved.dedup();
+        (u32::try_from(excess).unwrap_or(u32::MAX), involved)
+    }
+
     fn explain_pessimistic(&self, assignment: &UnifierAssignment) -> Option<Explanation> {
         let mut pessimistic = assignment.clone();
         for task in &self.tasks {
@@ -2217,10 +2261,17 @@ impl Constraint for SelectedResourceCapacity {
         !self.overloaded(assignment)
     }
 
+    fn violations(&self, assignment: &HashMap<VariableId, i64>) -> u32 {
+        self.overload(assignment).0
+    }
+
+    /// Names the clashing tasks, not the whole scope: a resource carries every activity that
+    /// may use it, and a repair that picks from all of them mostly moves an uninvolved one.
     fn explain(&self, assignment: &UnifierAssignment) -> Option<Explanation> {
-        self.overloaded(assignment).then(|| Explanation {
+        let (excess, involved) = self.overload(assignment);
+        (excess > 0).then(|| Explanation {
             constraint_name: "AlternativeResourceCapacity",
-            involved: self.scope.clone(),
+            involved,
             message: format!("selected resource capacity {} is exceeded", self.capacity),
         })
     }
