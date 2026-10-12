@@ -2662,12 +2662,28 @@ impl SelectedResourceCapacity {
     /// needs to tell a better assignment from a worse one inside an already broken resource.
     /// The involved starts are those of tasks running while the resource is over capacity.
     fn overload(&self, assignment: &HashMap<VariableId, i64>) -> (u32, Vec<VariableId>) {
-        // (time, delta, task): at equal times ends sort before starts, as in `overloaded`.
+        let mut events = self.events(assignment, None);
+        events.sort_unstable();
+        let mut involved = Vec::new();
+        let excess = self.sweep(&events, Some(&mut involved));
+        involved.sort_unstable();
+        involved.dedup();
+        (excess, involved)
+    }
+
+    /// `(time, delta, task)` per present, assigned task — except those starting at `skip`. At
+    /// equal times ends sort before starts, as in [`Self::overloaded`].
+    fn events(
+        &self,
+        assignment: &HashMap<VariableId, i64>,
+        skip: Option<VariableId>,
+    ) -> Vec<(i64, i64, usize)> {
         let mut events = Vec::with_capacity(self.tasks.len() * 2);
         for (index, task) in self.tasks.iter().enumerate() {
-            if task
-                .presence
-                .is_some_and(|presence| assignment.get(&presence) != Some(&1))
+            if Some(task.start) == skip
+                || task
+                    .presence
+                    .is_some_and(|presence| assignment.get(&presence) != Some(&1))
             {
                 continue;
             }
@@ -2678,27 +2694,39 @@ impl SelectedResourceCapacity {
             events.push((start, demand, index));
             events.push((start.saturating_add(task.duration), -demand, index));
         }
-        events.sort_unstable();
+        events
+    }
+
+    /// Every unit of demand above capacity over sorted `events`; with `involved`, also the starts
+    /// of the tasks running while the resource is over capacity.
+    fn sweep(
+        &self,
+        events: &[(i64, i64, usize)],
+        mut involved: Option<&mut Vec<VariableId>>,
+    ) -> u32 {
         let capacity = i64::from(self.capacity);
         let mut load = 0i64;
         let mut active: Vec<usize> = Vec::new();
         let mut excess = 0i64;
-        let mut involved: Vec<VariableId> = Vec::new();
-        for (_, delta, index) in events {
+        for &(_, delta, index) in events {
             load = load.saturating_add(delta);
             if delta < 0 {
-                active.retain(|&running| running != index);
+                if involved.is_some() {
+                    active.retain(|&running| running != index);
+                }
                 continue;
             }
-            active.push(index);
+            if let Some(involved) = involved.as_deref_mut() {
+                active.push(index);
+                if delta > 0 && load > capacity {
+                    involved.extend(active.iter().map(|&running| self.tasks[running].start));
+                }
+            }
             if delta > 0 && load > capacity {
                 excess = excess.saturating_add((load - capacity).min(delta));
-                involved.extend(active.iter().map(|&running| self.tasks[running].start));
             }
         }
-        involved.sort_unstable();
-        involved.dedup();
-        (u32::try_from(excess).unwrap_or(u32::MAX), involved)
+        u32::try_from(excess).unwrap_or(u32::MAX)
     }
 
     fn explain_pessimistic(&self, assignment: &UnifierAssignment) -> Option<Explanation> {
@@ -2733,7 +2761,48 @@ impl Constraint for SelectedResourceCapacity {
     }
 
     fn violations(&self, assignment: &HashMap<VariableId, i64>) -> u32 {
-        self.overload(assignment).0
+        let mut events = self.events(assignment, None);
+        events.sort_unstable();
+        self.sweep(&events, None)
+    }
+
+    /// The other tasks' events are read and sorted once per move; per candidate only the moved
+    /// tasks' events are merged in and swept. A move of a presence variable has no such shortcut.
+    fn move_violations<'s>(
+        &'s self,
+        assignment: &HashMap<VariableId, i64>,
+        var: VariableId,
+    ) -> Option<Box<dyn Fn(i64) -> u32 + 's>> {
+        if self.tasks.iter().any(|task| task.presence == Some(var)) {
+            return None;
+        }
+        let mut base = self.events(assignment, Some(var));
+        base.sort_unstable();
+        let moved: Vec<(usize, i64, i64)> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                task.start == var
+                    && !task
+                        .presence
+                        .is_some_and(|presence| assignment.get(&presence) != Some(&1))
+            })
+            .map(|(index, task)| (index, task.duration, i64::from(task.demand)))
+            .collect();
+        Some(Box::new(move |value| {
+            let mut events = base.clone();
+            for &(index, duration, demand) in &moved {
+                for event in [
+                    (value, demand, index),
+                    (value.saturating_add(duration), -demand, index),
+                ] {
+                    let at = events.partition_point(|existing| *existing < event);
+                    events.insert(at, event);
+                }
+            }
+            self.sweep(&events, None)
+        }))
     }
 
     /// Names the clashing tasks, not the whole scope: a resource carries every activity that
@@ -3394,6 +3463,17 @@ fn track_gaps(
     ranges: &[BucketRange],
     assignment: &HashMap<VariableId, i64>,
 ) -> Vec<i64> {
+    track_gaps_in(track, ranges, assignment, None)
+}
+
+/// [`track_gaps`], restricted to the buckets in `only` when given. Gaps never cross a bucket, so
+/// the restriction is exact: the sum over all buckets is the sum of the restricted sums.
+fn track_gaps_in(
+    track: &[BucketedTask],
+    ranges: &[BucketRange],
+    assignment: &HashMap<VariableId, i64>,
+    only: Option<&[usize]>,
+) -> Vec<i64> {
     let mut per_bucket: BTreeMap<usize, Vec<(i64, i64)>> = BTreeMap::new();
     for task in track {
         if let Some(presence) = task.presence
@@ -3407,6 +3487,9 @@ fn track_gaps(
         let Some(bucket) = bucket_of(ranges, start) else {
             continue;
         };
+        if only.is_some_and(|only| !only.contains(&bucket)) {
+            continue;
+        }
         per_bucket
             .entry(bucket)
             .or_default()
@@ -3489,26 +3572,58 @@ struct IdleObjective {
     tracks: Vec<Vec<BucketedTask>>,
     ranges: Vec<BucketRange>,
     scope: Vec<VariableId>,
+    /// The tracks each start or presence variable appears in — what a move of it can change.
+    tracks_of: HashMap<VariableId, Vec<usize>>,
 }
 
 impl IdleObjective {
     fn new(weight: i64, tracks: Vec<Vec<BucketedTask>>, ranges: Vec<BucketRange>) -> Self {
         let mut scope = Vec::new();
-        for track in &tracks {
+        let mut tracks_of: HashMap<VariableId, Vec<usize>> = HashMap::new();
+        for (index, track) in tracks.iter().enumerate() {
             for task in track {
                 scope.push(task.start);
+                tracks_of.entry(task.start).or_default().push(index);
                 if let Some(presence) = task.presence {
                     scope.push(presence);
+                    tracks_of.entry(presence).or_default().push(index);
                 }
             }
         }
         scope.sort_unstable();
         scope.dedup();
+        for owners in tracks_of.values_mut() {
+            owners.dedup();
+        }
         Self {
             weight,
             tracks,
             ranges,
             scope,
+            tracks_of,
+        }
+    }
+
+    /// The buckets `var` occupies in `track` under `assignment`: of the tasks it starts, or whose
+    /// presence it decides.
+    fn buckets_of(
+        &self,
+        track: &[BucketedTask],
+        var: VariableId,
+        assignment: &HashMap<VariableId, i64>,
+        into: &mut Vec<usize>,
+    ) {
+        for task in track {
+            if task.start != var && task.presence != Some(var) {
+                continue;
+            }
+            if let Some(bucket) = assignment
+                .get(&task.start)
+                .and_then(|&start| bucket_of(&self.ranges, start))
+                && !into.contains(&bucket)
+            {
+                into.push(bucket);
+            }
         }
     }
 }
@@ -3528,6 +3643,44 @@ impl Objective for IdleObjective {
             idle = idle.saturating_add(track_idle(track, &self.ranges, assignment));
         }
         soft_penalty(self.weight, idle)
+    }
+
+    /// Only the tracks `var` is in, and of those only the buckets it leaves and enters: gaps
+    /// never cross a bucket, so nothing else can change. One objective holds every person's
+    /// track, and evaluating all of them for every candidate value was most of a move's cost.
+    fn delta(
+        &self,
+        assignment: &mut HashMap<VariableId, i64>,
+        var: VariableId,
+        new_value: i64,
+    ) -> i64 {
+        let Some(owners) = self.tracks_of.get(&var) else {
+            return 0;
+        };
+        let gaps = |assignment: &HashMap<VariableId, i64>, buckets: &[usize]| {
+            owners
+                .iter()
+                .flat_map(|&index| {
+                    track_gaps_in(&self.tracks[index], &self.ranges, assignment, Some(buckets))
+                })
+                .fold(0i64, i64::saturating_add)
+        };
+        // The buckets before and after the move, so both sides count the same ground.
+        let mut buckets = Vec::with_capacity(2);
+        for &index in owners {
+            self.buckets_of(&self.tracks[index], var, assignment, &mut buckets);
+        }
+        let previous = assignment.insert(var, new_value);
+        for &index in owners {
+            self.buckets_of(&self.tracks[index], var, assignment, &mut buckets);
+        }
+        let after = gaps(assignment, &buckets);
+        match previous {
+            Some(value) => assignment.insert(var, value),
+            None => assignment.remove(&var),
+        };
+        let before = gaps(assignment, &buckets);
+        soft_penalty(self.weight, after).saturating_sub(soft_penalty(self.weight, before))
     }
 
     fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
@@ -3613,6 +3766,8 @@ struct SpreadObjective {
     groups: Vec<Vec<VariableId>>,
     ranges: Vec<BucketRange>,
     scope: Vec<VariableId>,
+    /// The groups each start variable belongs to.
+    groups_of: HashMap<VariableId, Vec<usize>>,
 }
 
 impl SpreadObjective {
@@ -3620,12 +3775,47 @@ impl SpreadObjective {
         let mut scope: Vec<VariableId> = groups.iter().flatten().copied().collect();
         scope.sort_unstable();
         scope.dedup();
+        let mut groups_of: HashMap<VariableId, Vec<usize>> = HashMap::new();
+        for (index, group) in groups.iter().enumerate() {
+            for &start in group {
+                let owners = groups_of.entry(start).or_default();
+                if !owners.contains(&index) {
+                    owners.push(index);
+                }
+            }
+        }
         Self {
             weight,
             groups,
             ranges,
             scope,
+            groups_of,
         }
+    }
+
+    /// Collisions of `group` inside `buckets`: `n(n-1)/2` for a bucket holding `n` of its
+    /// occurrences, the same count [`Objective::evaluate`] sums over every bucket.
+    fn collisions_in(
+        &self,
+        group: &[VariableId],
+        buckets: &[usize],
+        assignment: &HashMap<VariableId, i64>,
+    ) -> i64 {
+        buckets
+            .iter()
+            .map(|&bucket| {
+                let count = group
+                    .iter()
+                    .filter(|start| {
+                        assignment
+                            .get(start)
+                            .and_then(|&value| bucket_of(&self.ranges, value))
+                            == Some(bucket)
+                    })
+                    .count() as i64;
+                count.saturating_mul(count.saturating_sub(1)) / 2
+            })
+            .fold(0i64, i64::saturating_add)
     }
 }
 
@@ -3658,6 +3848,40 @@ impl Objective for SpreadObjective {
             }
         }
         soft_penalty(self.weight, collisions)
+    }
+
+    /// Only the groups `var` belongs to, and only the bucket it leaves and the one it enters.
+    fn delta(
+        &self,
+        assignment: &mut HashMap<VariableId, i64>,
+        var: VariableId,
+        new_value: i64,
+    ) -> i64 {
+        let Some(owners) = self.groups_of.get(&var) else {
+            return 0;
+        };
+        let old_bucket = assignment
+            .get(&var)
+            .and_then(|&value| bucket_of(&self.ranges, value));
+        let new_bucket = bucket_of(&self.ranges, new_value);
+        if old_bucket == new_bucket {
+            return 0;
+        }
+        let buckets: Vec<usize> = [old_bucket, new_bucket].into_iter().flatten().collect();
+        let count = |assignment: &HashMap<VariableId, i64>| {
+            owners
+                .iter()
+                .map(|&index| self.collisions_in(&self.groups[index], &buckets, assignment))
+                .fold(0i64, i64::saturating_add)
+        };
+        let before = count(assignment);
+        let previous = assignment.insert(var, new_value);
+        let after = count(assignment);
+        match previous {
+            Some(value) => assignment.insert(var, value),
+            None => assignment.remove(&var),
+        };
+        soft_penalty(self.weight, after).saturating_sub(soft_penalty(self.weight, before))
     }
 
     fn optimistic_bound(&self, _domains: &HashMap<VariableId, Domain>) -> i64 {
@@ -3919,6 +4143,159 @@ fn participant_is_assigned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prepared evaluator of `SelectedResourceCapacity` agrees with `violations` for every
+    /// candidate value (timbra Plan 53); a presence variable gets no evaluator.
+    #[test]
+    fn capacity_move_violations_agree_with_violations() {
+        let starts: Vec<VariableId> = (0..10).map(VariableId).collect();
+        for capacity in [1, 2] {
+            let tasks: Vec<SelectedTask> = (0..14)
+                .map(|index| SelectedTask {
+                    start: starts[index % 10],
+                    duration: [1, 2, 0, 3][index % 4],
+                    demand: [1, 1, 2][index % 3],
+                    presence: (index % 5 == 0).then(|| VariableId(100 + index as u32)),
+                })
+                .collect();
+            let constraint = SelectedResourceCapacity::new(tasks, capacity);
+            assert!(
+                constraint
+                    .move_violations(&HashMap::new(), VariableId(100))
+                    .is_none()
+            );
+
+            let mut seed = 0xd1b5_4a32_d192_ed03u64 + u64::from(capacity);
+            let mut next = |bound: u64| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed % bound
+            };
+            let mut assignment = HashMap::new();
+            for &start in &starts {
+                if next(6) > 0 {
+                    assignment.insert(start, next(16) as i64);
+                }
+            }
+            for index in (0..14).filter(|index| index % 5 == 0) {
+                assignment.insert(VariableId(100 + index), next(2) as i64);
+            }
+            for step in 0..1_500 {
+                let var = starts[next(10) as usize];
+                let by_value = constraint
+                    .move_violations(&assignment, var)
+                    .expect("an evaluator");
+                for value in 0..18 {
+                    let mut moved = assignment.clone();
+                    moved.insert(var, value);
+                    assert_eq!(
+                        by_value(value),
+                        constraint.violations(&moved),
+                        "capacity {capacity}, step {step}: {var:?} to {value}"
+                    );
+                }
+                if next(2) == 0 {
+                    assignment.insert(var, next(16) as i64);
+                } else if next(4) == 0 {
+                    assignment.remove(&var);
+                }
+            }
+        }
+    }
+
+    /// Plan 53 (timbra): `IdleObjective` and `SpreadObjective` answer a move with a delta over
+    /// the touched tracks and buckets only. It has to equal the difference of two full
+    /// evaluations, for every move — starts, presences, values outside every bucket, variables
+    /// in several tracks or groups, unassigned ones.
+    #[test]
+    fn the_local_deltas_equal_two_full_evaluations() {
+        let ranges: Vec<BucketRange> = (0..5)
+            .map(|day| BucketRange::new(day * 6, day * 6 + 6, day as usize))
+            .collect();
+        let starts: Vec<VariableId> = (0..30).map(VariableId).collect();
+        let presence = |index: u32| (index < 10).then(|| VariableId(100 + index));
+        let task = |index: u32| {
+            let task = BucketedTask::new(starts[index as usize], 1 + i64::from(index % 2), 1);
+            match presence(index) {
+                Some(var) => task.with_presence(var),
+                None => task,
+            }
+        };
+        // Overlapping membership: most tasks sit in two tracks, as a lesson sits with its class
+        // and its teacher.
+        let tracks: Vec<Vec<BucketedTask>> = (0..6)
+            .map(|track| {
+                (0..30)
+                    .filter(|i| i % 6 == track || (i * 7) % 6 == track)
+                    .map(task)
+                    .collect()
+            })
+            .collect();
+        let groups: Vec<Vec<VariableId>> = (0..8)
+            .map(|group| {
+                (0..30)
+                    .filter(|i| i % 8 == group || *i == 3)
+                    .map(|i| starts[i as usize])
+                    .collect()
+            })
+            .collect();
+        let objectives: Vec<Box<dyn Objective>> = vec![
+            Box::new(IdleObjective::new(3, tracks, ranges.clone())),
+            Box::new(SpreadObjective::new(2, groups, ranges)),
+        ];
+
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        let mut assignment: HashMap<VariableId, i64> = HashMap::new();
+        for (index, &start) in starts.iter().enumerate() {
+            if next(10) > 0 {
+                assignment.insert(start, next(32) as i64);
+            }
+            if let Some(var) = presence(index as u32) {
+                assignment.insert(var, next(2) as i64);
+            }
+        }
+        let variables: Vec<VariableId> = starts
+            .iter()
+            .copied()
+            .chain((0..10).map(|i| VariableId(100 + i)))
+            .collect();
+
+        for step in 0..5_000 {
+            let var = variables[next(variables.len() as u64) as usize];
+            let value = if var.0 >= 100 {
+                next(2) as i64
+            } else {
+                next(32) as i64
+            };
+            for objective in &objectives {
+                let before = objective.evaluate(&assignment);
+                let unchanged = assignment.clone();
+                let delta = objective.delta(&mut assignment, var, value);
+                assert_eq!(
+                    assignment, unchanged,
+                    "step {step}: delta must restore the assignment"
+                );
+                let mut moved = assignment.clone();
+                moved.insert(var, value);
+                assert_eq!(
+                    delta,
+                    objective.evaluate(&moved) - before,
+                    "step {step}: {:?} moving {var:?} to {value}",
+                    objective
+                );
+            }
+            if next(2) == 0 {
+                assignment.insert(var, value);
+            }
+        }
+    }
 
     /// The guard in `InternalCompiled::solve_result`: an assignment that breaks a hard
     /// constraint must not be handed on as a schedule, whatever the search claims about it.
