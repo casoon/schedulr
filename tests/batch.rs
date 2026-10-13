@@ -87,7 +87,7 @@ fn a_schedule_survives_a_budget_too_small_to_optimize() {
     let room = Resource::new(ResourceId(1), "Room", 1);
     let first = Participant::new(ParticipantId(1), "P1");
     let second = Participant::new(ParticipantId(2), "P2");
-    let activities: Vec<Activity> = (1..=16)
+    let activities: Vec<Activity> = (1..=26)
         .map(|id| {
             let owner = if id % 2 == 0 { first.id() } else { second.id() };
             Activity::new(ActivityId(id), format!("a{id}"), TimeWindow::new(0, 60), 2)

@@ -9,8 +9,8 @@
 //! lectures at once — that is the competition's teacher and curriculum conflicts plus "the
 //! lectures of a course take distinct periods". A course's unavailable periods are blocked
 //! windows of the course participant. Rooms form one pool. The soft side is approximated with
-//! the goals `schedulr` has (spread over days, idle time, room stability); room capacity is
-//! not modelled. What counts is the **independent** evaluation below, which scores the result
+//! the goals `schedulr` has (spread over days, idle time, room stability) and room capacity as
+//! a resource cost per course: a room costs the students it lacks, as in UD2. What counts is the **independent** evaluation below, which scores the result
 //! exactly as the competition did (formulation UD2).
 //!
 //! The parse test runs always; the solve is `#[ignore]`, because it spends its whole budget:
@@ -24,9 +24,10 @@
 #![allow(clippy::print_stdout)]
 
 use schedulr::{
-    Activity, ActivityId, DayTemplate, Participant, ParticipantId, Resource, ResourceId,
-    ResourcePool, ResourcePoolId, ResourceRequirement, ScheduleTemplate, SchedulingProblem,
-    ScoreLevel, SlotTemplate, SoftGoal, SoftGoalKind, Solution, SolveOptions, TimeWindow, compile,
+    Activity, ActivityId, DayTemplate, Participant, ParticipantId, Resource, ResourceCostGoal,
+    ResourceId, ResourcePool, ResourcePoolId, ResourceRequirement, ScheduleTemplate,
+    SchedulingProblem, ScoreLevel, SlotTemplate, SoftGoal, SoftGoalKind, Solution, SolveOptions,
+    TimeWindow, compile,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -153,7 +154,7 @@ fn problem(instance: &Instance) -> (SchedulingProblem, BTreeMap<ActivityId, usiz
     }
 
     // Capacity in `schedulr` is concurrent use, not seats: one lecture per room and period.
-    // Seats are not modelled; the evaluation charges them.
+    // Seats are a resource cost below.
     let rooms: Vec<Resource> = instance
         .rooms
         .iter()
@@ -191,7 +192,12 @@ fn problem(instance: &Instance) -> (SchedulingProblem, BTreeMap<ActivityId, usiz
         template = template.with_day(day_template);
     }
 
-    let problem = SchedulingProblem::new(rooms, participants, activities)
+    let mut lectures_of: BTreeMap<usize, Vec<ActivityId>> = BTreeMap::new();
+    for (activity, course) in &course_of {
+        lectures_of.entry(*course).or_default().push(*activity);
+    }
+
+    let mut problem = SchedulingProblem::new(rooms, participants, activities)
         .with_resource_pool(ResourcePool::new(
             ResourcePoolId(1),
             "rooms",
@@ -216,6 +222,28 @@ fn problem(instance: &Instance) -> (SchedulingProblem, BTreeMap<ActivityId, usiz
             1,
             SoftGoalKind::RoomStability,
         ));
+    // UD2 charges every student over the room's capacity, once per lecture.
+    for (course, lectures) in lectures_of {
+        let students = instance.courses[course].students;
+        problem = problem.with_resource_cost_goal(ResourceCostGoal {
+            category: "room capacity".to_string(),
+            level: ScoreLevel::Weak,
+            weight: 1,
+            activities: lectures,
+            costs: instance
+                .rooms
+                .iter()
+                .enumerate()
+                .map(|(index, (_, seats))| {
+                    (
+                        ResourceId(index as u64 + 1),
+                        i64::from(students.saturating_sub(*seats)),
+                    )
+                })
+                .collect(),
+            default_cost: 0,
+        });
+    }
     (problem, course_of)
 }
 
