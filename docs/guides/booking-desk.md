@@ -61,7 +61,7 @@ The distinction is deliberate: a room cannot hold two appointments, but a person
 double-booked. Your application decides whether to show a warning or refuse. An application whose
 people *cannot* be in two places at once passes
 `SchedulingProblem::with_participant_conflict_policy(ParticipantConflictPolicy::Blocking)` — see
-[Conflicts and errors](../reference/conflicts.md).
+[Conflicts and errors](../../reference/conflicts/).
 
 ## Move, change and cancel
 
