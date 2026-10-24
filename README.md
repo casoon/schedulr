@@ -24,8 +24,15 @@ The current release is 0.14. It provides, among others:
   pools, and hierarchical/overlapping participant groups;
 - periodic slot calendars with absolute exceptions and lexicographic
   Strong/Medium/Weak score components;
-- `compile` → `solve` plus `analyze`, `evaluate_move`, `suggest`, `compare`,
-  `explain`, and baseline-aware `repair` paths.
+- recurring activities and participant choice groups (one teacher for every
+  lesson of a course);
+- day and bucket rules — daily load, breaks, active days, day shape, starts and
+  block patterns per day — hard by default, or soft with a `SoftPenalty`;
+- goals for time preferences, free time, distribution over the week, room costs
+  and room changes;
+- `compile` → `solve`/`solve_with` plus `check`, `analyze`, `evaluate_move`,
+  `evaluate_changes`, `suggest`, `compare`, `explain`, and baseline-aware
+  `repair` paths.
 
 The single-activity path evaluates only constraints affected by the proposed
 change and does not start a solver search. Persistence remains an application

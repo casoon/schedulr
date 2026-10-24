@@ -83,6 +83,44 @@ Participants are attached in three ways:
 | `with_participant_group(id)` | Every member of the group attends. |
 | `with_participant_requirement(req)` | One participant, chosen by the solver. |
 
+When several activities with a chosen participant must agree on the same one — every lesson of a
+course taught by one teacher — tie them together on the problem with a `ParticipantChoiceGroup`:
+
+```rust
+use schedulr::{ActivityId, ParticipantChoiceGroup};
+
+let problem = problem.with_participant_choice_group(ParticipantChoiceGroup::new(vec![
+    ActivityId(1),
+    ActivityId(2),
+    ActivityId(3),
+]));
+```
+
+Each activity of the group needs a participant requirement chosen by the solver, and their
+candidate sets must share at least one participant; otherwise `compile` fails.
+
+## Recurring activities
+
+`with_recurring_activity(template, recurrence)` adds a series of activities that keep a fixed
+distance, such as a weekly seminar. The template is a blueprint and is not added itself; every
+instance is listed in `Recurrence::instances` as `(k, id)`, and instance `k` gets the template's
+window shifted by `k * step`. Each instance keeps the template's duration and all its
+requirements.
+
+```rust
+use schedulr::{Activity, ActivityId, Recurrence, TimeWindow};
+
+// One unit = one hour: a two-hour seminar some time in the first week, then every week.
+let seminar = Activity::new(ActivityId(100), "Seminar", TimeWindow::new(0, 168), 2);
+let problem = problem.with_recurring_activity(seminar, Recurrence {
+    step: 168,
+    instances: vec![(0, ActivityId(1)), (1, ActivityId(2)), (2, ActivityId(3))],
+});
+```
+
+The instances are linked by `FixedOffset` relations to the first listed instance, so the solver
+moves the whole series together: if the first seminar is on Tuesday at 10, all of them are.
+
 ## Resource requirements
 
 A `ResourceRequirement` says how many units of which resource an activity needs. It is either
@@ -120,9 +158,10 @@ let compiled = compile(&problem)?;
 let result = compiled.solve();
 ```
 
-Calendars, score rules and activity relations are added the same way; they have their own
-pages: [Calendars and availability](../calendars/) and
-[Relations and scores](../relations-and-scores/).
+Calendars, day rules, score rules, goals and activity relations are added the same way; they have
+their own pages: [Calendars and availability](../calendars/),
+[Day and bucket rules](../day-rules/), [Relations and scores](../relations-and-scores/) and
+[Goals and preferences](../goals/).
 
 `compile` validates the whole problem before building the model: duplicate ids, zero capacities,
 invalid windows, unknown references and empty candidate sets are collected into one

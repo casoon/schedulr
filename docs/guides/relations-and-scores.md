@@ -1,7 +1,7 @@
 ---
 title: Relations and scores
 description: Hard relations tie two activities together in time. Score rules express preferences on three levels, and every solution reports how each rule contributed.
-order: 3
+order: 4
 ---
 
 ## Activity relations
@@ -65,13 +65,18 @@ A `PreferWindow` rule costs `-weight` when the activity starts outside the prefe
 period bucket instead, by offset from the bucket's start — "not in the first period of a day".
 `KeepStart` is used by [repair](../analysis-and-repair/) to keep activities where they were.
 
+Preferences that concern a person, a resource or a whole course rather than one activity are
+[goals](../goals/); the soft form of a day rule is described in
+[Day and bucket rules](../day-rules/#hard-or-soft). All of them are scored on the same three
+levels and reported in the same `score_components`.
+
 ## Score levels
 
 `ScoreLevel` has three tiers: `Strong`, `Medium` and `Weak`. They are compared
 lexicographically: any improvement on a higher level beats every possible improvement on a lower
 one, no matter the weights. Weights only compare rules on the same level.
 
-When a problem has score rules, `solve()` constructs a feasible plan and then optimises the
+When a problem has score rules or goals, `solve()` constructs a feasible plan and then optimises the
 score; without rules it returns the first feasible plan it constructs (see
 [Solving](../analysis-and-repair/#solving)).
 `SolveStatistics::optimal` tells you whether the search proved the result optimal.

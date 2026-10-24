@@ -34,8 +34,9 @@ pub struct MoveEvaluation {
     pub score_components: Vec<ScoreComponent>,
 }
 
-/// One requested change in an atomic batch: a move or a swap. Every request in a batch is
-/// evaluated against the *same* starting solution, so a batch is all-or-nothing.
+/// One requested change in an atomic batch: a move, a swap, or a resource or participant
+/// replacement. Every request in a batch is evaluated against the *same* starting solution, so a
+/// batch is all-or-nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeRequest {
     /// Moves `activity` to `window`; the duration must stay unchanged.
@@ -313,7 +314,7 @@ impl CompiledProblem {
     }
 
     /// Evaluates several changes **atomically** against one starting solution (plan 25,
-    /// B4). Move and swap can be mixed in one batch; everything is applied to a private
+    /// B4). All kinds can be mixed in one batch; everything is applied to a private
     /// copy of the assignment, so a half-applied state can never be observed and the
     /// starting solution is never mutated. The first invalid request aborts the whole
     /// batch with a blocking `ActivityDomain` violation — as does a starting solution that

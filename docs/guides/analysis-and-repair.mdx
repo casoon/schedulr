@@ -1,7 +1,7 @@
 ---
 title: Analysis and repair
-description: Explain why a problem has no plan, estimate pressure before solving, evaluate a manual move, compare two plans, and repair a plan with as few changes as possible.
-order: 5
+description: Control a solve run, explain why a problem has no plan, estimate pressure before solving, evaluate manual edits, compare two plans, and repair a plan with as few changes as possible.
+order: 7
 ---
 
 All of these work on a `CompiledProblem`, the result of `compile`.
@@ -17,6 +17,26 @@ that satisfies the hard constraints; without score rules or goals that is the wh
 | `ConstructThenPortfolio` (default) | unifier's four-worker portfolio (backtracking, local search, LNS, branch and bound) improves the schedule for the remaining budget |
 | `ConstructThenOptimize` | branch and bound improves it; repeatable from run to run |
 | `OptimizeOnly` | no construction phase, one branch-and-bound run over the whole budget |
+
+`SolveOptions` has three public fields: `time_limit` (`None` searches without a limit),
+`cancellation_token` and `strategy`. A `CancellationToken` stops a running search from another
+thread; clones share one flag, so keep a clone and call `cancel()` on it:
+
+```rust
+use schedulr::{CancellationToken, SolveOptions, SolveStrategy};
+use std::time::Duration;
+
+let token = CancellationToken::new();
+let options = SolveOptions {
+    time_limit: Some(Duration::from_secs(30)),
+    cancellation_token: Some(token.clone()),
+    strategy: SolveStrategy::ConstructThenOptimize,
+};
+// Elsewhere, for example when the user closes the dialog: token.cancel();
+let result = compiled.solve_with(&options);
+```
+
+A cancelled search returns `SolveStatus::Aborted(AbortReason::Cancelled)`.
 
 A search that hits the limit returns `SolveStatus::Aborted` with the best feasible solution found
 so far, if any. A schedule that violates hard constraints is never returned as `solution`; the
@@ -86,11 +106,51 @@ window. The window must keep the activity's duration and stay inside its allowed
 `suggest(&solution, window)` runs `evaluate_move` for every activity and returns the feasible
 ones, best score delta first: "which activity could go into this free slot?".
 
+## evaluate_changes
+
+`evaluate_changes(&solution, &changes)` evaluates several edits at once, as one atomic batch. A
+`ChangeRequest` is one of:
+
+| `ChangeRequest` | Edit |
+| --- | --- |
+| `Move { activity, window }` | Moves the activity; the duration stays and the window must lie inside the activity's allowed window |
+| `Swap { first, second }` | Exchanges the windows of two activities of equal duration |
+| `ReplaceResource { activity, from, to }` | Uses resource `to` instead of `from`; `to` must be a candidate of the requirement `from` fills |
+| `ReplaceParticipant { activity, from, to }` | Hands the activity from `from` to `to`; `to` must be a candidate of the same participant requirement |
+
+Every request refers to the windows of the starting solution, which is never changed. A batch is
+all or nothing: the first invalid request, or a starting solution naming an activity the problem
+no longer contains, makes the whole batch a blocking `ActivityDomain` violation.
+
+```rust
+use schedulr::{ActivityId, ChangeRequest, ParticipantId};
+
+let evaluation = compiled.evaluate_changes(&solution, &[
+    ChangeRequest::Swap { first: ActivityId(1), second: ActivityId(4) },
+    ChangeRequest::ReplaceParticipant {
+        activity: ActivityId(4),
+        from: ParticipantId(1),
+        to: ParticipantId(3),
+    },
+]);
+if evaluation.is_feasible {
+    store(evaluation.candidate);
+}
+```
+
+The `ChangeEvaluation` has the same fields as a `MoveEvaluation` (`is_feasible`,
+`hard_violations`, `warnings`, `score_delta`, `score_components`, `explanations`) plus
+`candidate`, the plan the batch would produce. `candidate` is built for refused batches too, so a
+UI can show what was attempted; check `is_feasible` before storing it.
+
 ## compare
 
 `compare(&before, &after)` is a free function. It lists every `AssignmentChange` (`Added`,
 `Removed` or `Changed`, with the assignment before and after) and the `score_delta` between two
-solutions, for example to show a reviewer what a re-plan changed.
+solutions, for example to show a reviewer what a re-plan changed. `AssignmentChange::aspects()`
+returns `ChangeAspects { time, resources, participants }`, three flags saying which parts of the
+assignment differ; `Added` and `Removed` set all three. What a changed participant means (a new
+teacher, a different class) is left to your application.
 
 ## repair
 

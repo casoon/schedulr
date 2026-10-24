@@ -36,7 +36,7 @@ let problem = SchedulingProblem::new(resources, participants, activities)
 | `Cumulative` | Activities on a resource with capacity above 1 exceed that capacity |
 | `AlternativeResourceCapacity` | The candidates of flexible requirements cannot hold all activities |
 | `Precedence` | A `Precedence` relation is violated |
-| `Equal` | A `SameStart` or `Consecutive` relation is violated |
+| `Equal` | A `SameStart`, `Consecutive` or `FixedOffset` relation is violated (including the instances of a recurring activity) |
 | `PeriodicValues` | A start lies outside the slot calendar or on an exception |
 | `ForbiddenValues` | A start lies in an unavailable range of a resource or participant |
 | `ParticipantChoiceGroup` | A participant choice group gets a selection it does not allow |
@@ -49,6 +49,10 @@ let problem = SchedulingProblem::new(resources, participants, activities)
 | `Model` | `SchedulingState` received invalid input, for example an unknown activity to exclude |
 | `ActivityDomain` | `evaluate_move` got an unknown activity or a window outside the activity's domain, or `check` got an assignment for an activity the problem does not contain |
 | `Unassigned` | `check` found a modeled activity without an assignment in the solution |
+
+Only hard rules raise conflicts. A rule made soft with `.soft(...)`, a `ConsecutiveRunLimit`
+and every [goal](../../guides/goals/) are preferences: what they cost appears in
+`score_components` under their category, not as a `Conflict`.
 
 Messages for overlaps name the intervals, for example:
 
@@ -73,7 +77,13 @@ Advisory NoOverlap [a1, a2]: Chris: Intervals [9, 11) and [10, 12) overlap
 - a schedule template with a cycle length of 0 or less, or without any slot;
 - an activity outside the academic period;
 - a score rule for an unknown activity or with a weight of 0 or less;
-- an activity relation with an unknown activity, or relating an activity to itself.
+- an activity relation with an unknown activity, or relating an activity to itself;
+- a `MaximumDailyLoad`, `MinimumBreak`, `DayRule`, `IsolatedBlockGoal`, `JointPresenceGoal` or
+  `ConcurrentFreeGoal` naming an unknown resource or participant, or an activity;
+- a `TimePreference` naming an unknown resource or participant, or with a window that ends before
+  it starts;
+- a `ParticipantChoiceGroup` with an unknown activity, an activity without a solver-chosen
+  participant, or no candidate common to all its activities.
 
 From the [conflicts example](../../../showcase/explain-conflicts/):
 

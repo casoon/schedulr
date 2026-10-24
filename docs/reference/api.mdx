@@ -25,11 +25,13 @@ Everything below is exported from the crate root (`use schedulr::…`).
   name="CompiledProblem"
   signature={`impl CompiledProblem {
     pub fn solve(&self) -> SolveResult
+    pub fn solve_with(&self, options: &SolveOptions) -> SolveResult
     pub fn explain(&self, result: &SolveResult) -> Vec<Conflict>
     pub fn check(&self, solution: &Solution) -> SolutionCheck
     pub fn analyze(&self) -> Analysis
     pub fn evaluate_move(&self, solution: &Solution, activity: ActivityId, proposed: TimeWindow) -> MoveEvaluation
     pub fn suggest(&self, solution: &Solution, proposed: TimeWindow) -> Vec<Suggestion>
+    pub fn evaluate_changes(&self, solution: &Solution, changes: &[ChangeRequest]) -> ChangeEvaluation
     pub fn repair(&self, baseline: &Solution, options: &RepairOptions) -> SolveResult
     pub fn repair_with_outcome(&self, baseline: &Solution, options: &RepairOptions) -> RepairResult
 }`}
@@ -55,6 +57,37 @@ Everything below is exported from the crate root (`use schedulr::…`).
   signature={`pub fn compare(before: &Solution, after: &Solution) -> SolutionComparison`}
 >
   Lists added, removed and changed assignments and the score delta between two solutions.
+</ApiEntry>
+
+## Buckets
+
+<ApiEntry
+  kind="fn"
+  name="bucket_windows"
+  signature={`pub fn bucket_windows(
+    template: Option<&ScheduleTemplate>,
+    min_value: i64,
+    max_value: i64,
+) -> Vec<BucketWindow>`}
+>
+  The period buckets the day and bucket rules are measured in: one per day of the template,
+  repeated every cycle, or the whole range without a template. See
+  [Day and bucket rules](../../guides/day-rules/#buckets).
+</ApiEntry>
+
+<ApiEntry
+  kind="fn"
+  name="bucket_load_pattern"
+  signature={`pub fn bucket_load_blocks(assignments: &[(ActivityId, TimeWindow)], buckets: &[TimeWindow]) -> Vec<Vec<i64>>
+pub fn bucket_load_pattern(assignments: &[(ActivityId, TimeWindow)], buckets: &[TimeWindow]) -> Vec<i64>
+pub fn matches_bucket_load_pattern(
+    pattern: &BucketLoadPattern,
+    assignments: &[(ActivityId, TimeWindow)],
+    buckets: &[TimeWindow],
+) -> bool`}
+>
+  Block lengths per bucket, all block lengths largest first, and whether they match a
+  `BucketLoadPattern` — the same measurement the solver uses, for plans outside it.
 </ApiEntry>
 
 ## Single-activity checks
@@ -90,8 +123,21 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | `ResourceRequirement`, `ParticipantRequirement` | Exact or solver-chosen resources and people |
 | `ParticipantConflictPolicy` | Whether a participant conflict blocks or is only reported |
 | `ScheduleTemplate`, `DayTemplate`, `SlotTemplate`, `BreakTemplate`, `AcademicPeriod` | Calendars |
-| `ScoreRule`, `ScoreRuleKind`, `ScoreLevel` | Preferences |
-| `ActivityRelation`, `ActivityRelationConstraint` | Hard relations between activities |
+| `ParticipantChoiceGroup` | Activities that must choose the same participant |
+| `Recurrence` | Instances of a recurring activity, for `with_recurring_activity` |
+| `ScoreRule`, `ScoreRuleKind`, `ScoreLevel` | Preferences for one activity |
+| `ActivityRelation`, `ActivityRelationConstraint` | Relations between activities, hard or soft |
+| `SoftPenalty` | Makes a hard rule or relation a preference (`.soft(...)`) |
+| `MaximumDailyLoad`, `MinimumBreak`, `MaximumActiveBuckets` | Load, breaks and active days of one entity, see [Day and bucket rules](../../guides/day-rules/) |
+| `DayRule`, `DayRuleKind` | The shape of one entity's day |
+| `MaximumBucketStarts`, `MaximumDistinctPerBucket`, `ConsecutiveRunLimit` | Starts, distinct groups and back-to-back runs of activities per bucket |
+| `BucketLoadPattern`, `BucketWindow` | Allowed block shapes of a group of activities, and the buckets they are measured in |
+| `TimePreference`, `IdleBounds` | Preferred times and free-time band of one entity, see [Goals and preferences](../../guides/goals/) |
+| `SoftGoal`, `SoftGoalKind` | Global preferences: idle time, room stability, spreading over days |
+| `ActivityGoal`, `ActivityGoalKind`, `ProximityMode` | Distribution of a set of activities over the buckets |
+| `ResourceCostGoal`, `RoomChangeGoal` | Resource ranking, room changes and travel |
+| `IsolatedBlockGoal`, `JointPresenceGoal`, `ConcurrentFreeGoal` | Lone blocks, joint presence, simultaneous free time |
+| `SolveOptions`, `SolveStrategy`, `CancellationToken` | Time limit, strategy and cancellation for `solve_with` |
 | `RepairOptions` | Settings for `repair`: start and assignment penalties, `frozen` activities, cancellation, time limit |
 | `RepairOutcome`, `RepairResult` | Whether `repair_with_outcome` repaired or fell back to `solve` |
 
@@ -106,3 +152,6 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | `Conflict`, `ConflictSeverity`, `EntityRef` | Structured conflicts, see [Conflicts and errors](../conflicts/) |
 | `CompileError` | All validation messages of a failed `compile` |
 | `Analysis`, `Bottleneck`, `MoveEvaluation`, `Suggestion`, `SolutionComparison`, `AssignmentChange` | Results of the analysis functions |
+| `ChangeRequest`, `ChangeEvaluation` | A batch of edits for `evaluate_changes`, and its verdict |
+| `ChangeAspects` | Which parts of an `AssignmentChange` differ |
+| `AbortReason` | Why a search stopped early |

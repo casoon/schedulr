@@ -1184,7 +1184,7 @@ impl ParticipantChoiceGroup {
 ///
 /// `allowed` holds multisets of **consecutive block durations**, order irrelevant: `[2, 1, 1]`
 /// means "one double block and two single blocks", regardless of which buckets they land in.
-/// The buckets themselves come from the [`ScheduleTemplate`] (see `load_bucket_ranges`), so
+/// The buckets themselves come from the [`ScheduleTemplate`] (see [`bucket_windows`]), so
 /// schedulr never learns what a "day" or "week" is — the caller supplies the context.
 /// An empty `allowed` list means "no pattern chosen", and the rule simply does not apply.
 ///

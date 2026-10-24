@@ -2,7 +2,7 @@
 title: Booking single activities
 sidebarLabel: Booking single activities
 description: SchedulingState answers "does this one appointment fit?" without starting a solver search. Create, move, cancel and change participants of committed activities.
-order: 4
+order: 6
 ---
 
 Batch solving plans a whole problem at once. A booking desk, a calendar UI or an API endpoint
