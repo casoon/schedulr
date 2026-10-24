@@ -25,8 +25,7 @@ export default defineConfig({
         concepts: 'Concepts',
         reference: 'Reference',
       },
-      // schedulr has no CHANGELOG.md and no git tags yet.
-      changelog: false,
+      changelog: '../CHANGELOG.md',
     }),
   ],
 });
