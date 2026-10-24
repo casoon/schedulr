@@ -2144,7 +2144,7 @@ fn resolve_requirement(
         .collect()
 }
 
-fn resolve_participant_requirement(
+pub(crate) fn resolve_participant_requirement(
     problem: &SchedulingProblem,
     requirement: &ParticipantRequirement,
 ) -> Vec<ParticipantId> {

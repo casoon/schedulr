@@ -1,3 +1,4 @@
+use crate::batch::resolve_participant_requirement;
 use crate::{
     ActivityId, Assignment, CompiledProblem, Conflict, ConflictSeverity, EntityRef, ParticipantId,
     ResourceId, Score, ScoreComponent, Solution, TimeWindow,
@@ -222,6 +223,16 @@ impl CompiledProblem {
         for activity in self.internal.activities.values() {
             for participant in activity.participants() {
                 *required_by_participant.entry(*participant).or_insert(0u64) += activity.duration();
+            }
+            // A participant the solver still chooses from a requirement carries demand
+            // too; like a resource requirement, it is spread over the candidates.
+            for requirement in activity.participant_requirements() {
+                let candidates = resolve_participant_requirement(&self.problem, requirement);
+                let divisor = u64::try_from(candidates.len()).unwrap_or(1).max(1);
+                let demand = activity.duration().div_ceil(divisor);
+                for participant in candidates {
+                    *required_by_participant.entry(participant).or_insert(0u64) += demand;
+                }
             }
         }
         bottlenecks.extend(self.problem.participants.iter().map(|participant| {

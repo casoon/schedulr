@@ -336,6 +336,43 @@ fn tiered_scores_drive_solving_and_explain_move_deltas() {
 }
 
 #[test]
+fn analyze_counts_participants_the_solver_still_chooses() {
+    let exact = |id| {
+        Activity::new(ActivityId(id), "exact", TimeWindow::new(0, 4), 1)
+            .with_participant_requirement(ParticipantRequirement::new(ParticipantId(1)))
+    };
+    let chosen = Activity::new(ActivityId(3), "chosen", TimeWindow::new(0, 4), 2)
+        .with_participant_requirement(
+            ParticipantRequirement::matching()
+                .with_candidate(ParticipantId(2))
+                .with_candidate(ParticipantId(3)),
+        );
+    let problem = SchedulingProblem::new(
+        vec![],
+        vec![
+            Participant::new(ParticipantId(1), "fixed"),
+            Participant::new(ParticipantId(2), "candidate a"),
+            Participant::new(ParticipantId(3), "candidate b"),
+        ],
+        vec![exact(1), exact(2), chosen],
+    );
+    let analysis = compile(&problem).unwrap().analyze();
+    let required = |id| {
+        analysis
+            .bottlenecks
+            .iter()
+            .find(|bottleneck| {
+                bottleneck.entity == schedulr::EntityRef::Participant(ParticipantId(id))
+            })
+            .map(|bottleneck| bottleneck.required)
+    };
+
+    assert_eq!(required(1), Some(2));
+    assert_eq!(required(2), Some(1));
+    assert_eq!(required(3), Some(1));
+}
+
+#[test]
 fn analyze_runs_without_solving_and_repair_minimizes_changes() {
     let old_room = Resource::new(ResourceId(1), "Shared room", 2);
     let first = Activity::new(ActivityId(1), "first", TimeWindow::new(0, 2), 1)
