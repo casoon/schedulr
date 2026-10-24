@@ -323,6 +323,7 @@ pub struct ResourceRequirement {
     candidates: BTreeSet<ResourceId>,
     required_features: BTreeSet<String>,
     minimum_capacity: u32,
+    minimum_capacity_dimension: String,
     dimension: String,
     units: u32,
     attributes: BTreeMap<String, String>,
@@ -337,6 +338,7 @@ impl ResourceRequirement {
             candidates: BTreeSet::new(),
             required_features: BTreeSet::new(),
             minimum_capacity: units,
+            minimum_capacity_dimension: DEFAULT_CAPACITY_DIMENSION.to_string(),
             dimension: DEFAULT_CAPACITY_DIMENSION.to_string(),
             units,
             attributes: BTreeMap::new(),
@@ -351,6 +353,7 @@ impl ResourceRequirement {
             candidates: BTreeSet::new(),
             required_features: BTreeSet::new(),
             minimum_capacity: units,
+            minimum_capacity_dimension: DEFAULT_CAPACITY_DIMENSION.to_string(),
             dimension: dimension.into(),
             units,
             attributes: BTreeMap::new(),
@@ -366,6 +369,7 @@ impl ResourceRequirement {
             candidates: BTreeSet::new(),
             required_features: BTreeSet::new(),
             minimum_capacity: units,
+            minimum_capacity_dimension: DEFAULT_CAPACITY_DIMENSION.to_string(),
             dimension: DEFAULT_CAPACITY_DIMENSION.to_string(),
             units,
             attributes: BTreeMap::new(),
@@ -390,6 +394,15 @@ impl ResourceRequirement {
     }
 
     pub fn with_minimum_capacity(mut self, capacity: u32) -> Self {
+        self.minimum_capacity = capacity;
+        self
+    }
+
+    /// Like `with_minimum_capacity`, but checked against a named capacity dimension (for example
+    /// a size such as seats) instead of the parallel units. A resource without that dimension
+    /// does not match.
+    pub fn with_minimum_capacity_in(mut self, dimension: impl Into<String>, capacity: u32) -> Self {
+        self.minimum_capacity_dimension = dimension.into();
         self.minimum_capacity = capacity;
         self
     }
@@ -426,6 +439,18 @@ impl ResourceRequirement {
 
     pub const fn minimum_capacity(&self) -> u32 {
         self.minimum_capacity
+    }
+
+    pub fn minimum_capacity_dimension(&self) -> &str {
+        &self.minimum_capacity_dimension
+    }
+
+    /// Whether `resource` is large enough in the minimum-capacity dimension.
+    pub fn fits_capacity_of(&self, resource: &Resource) -> bool {
+        resource
+            .capacities()
+            .get(&self.minimum_capacity_dimension)
+            .is_some_and(|capacity| *capacity >= self.minimum_capacity)
     }
 
     pub fn dimension(&self) -> &str {

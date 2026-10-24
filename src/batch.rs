@@ -2128,7 +2128,7 @@ fn resolve_requirement(
             requirement
                 .resource_type()
                 .is_none_or(|kind| resource.resource_type() == kind)
-                && resource.capacity() >= requirement.minimum_capacity()
+                && requirement.fits_capacity_of(resource)
                 && requirement
                     .required_features()
                     .is_subset(resource.features())

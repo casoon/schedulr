@@ -34,8 +34,9 @@ let lab = Resource::new(ResourceId(3), "Lab 1", 12)
 - `with_type` and `with_feature` are what matching requirements look for (see below). The type
   defaults to `"resource"`.
 - `with_attribute` stores free-form key/value data for your application.
-- `with_capacity_dimension` stores additional named capacities. The solver currently enforces
-  only the default `units` dimension.
+- `with_capacity_dimension` stores additional named capacities. The solver enforces only the
+  default `units` dimension as parallel capacity; a named dimension can describe a size, such as
+  the seats of a room, that requirements check with `with_minimum_capacity_in`.
 
 A `ResourcePool` names a set of interchangeable resources, for example "Seminar rooms".
 
@@ -94,7 +95,9 @@ exact or resolved by the solver:
 | `ResourceRequirement::from_pool(pool, units)` | one resource from this pool |
 
 Flexible requirements can be narrowed further with `with_feature` (the resource must have all
-listed features), `with_minimum_capacity` and `with_candidate` (an explicit allow list). If no
+listed features), `with_minimum_capacity` (checked against `units`),
+`with_minimum_capacity_in(dimension, capacity)` (checked against a named dimension; resources
+without it do not match) and `with_candidate` (an explicit allow list). If no
 resource matches, `compile` fails with "has no matching resource for a requirement".
 
 `ParticipantRequirement` works the same way for people: `new(id)`, `matching()` (any

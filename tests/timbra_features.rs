@@ -66,6 +66,61 @@ fn infeasible_alternative_resources_have_an_explanation() {
     }));
 }
 
+/// A size such as seats is not parallel capacity: a 32-seat room still hosts one activity at a
+/// time when the size lives in its own dimension.
+#[test]
+fn minimum_capacity_in_a_named_dimension_does_not_add_parallel_units() {
+    let room = Resource::new(ResourceId(1), "Room 1", 1)
+        .with_type("room")
+        .with_capacity_dimension("seats", 32);
+    let activities = (1..=2)
+        .map(|id| {
+            Activity::new(
+                ActivityId(id),
+                format!("activity {id}"),
+                TimeWindow::new(0, 1),
+                1,
+            )
+            .with_requirement(
+                ResourceRequirement::matching("room", 1).with_minimum_capacity_in("seats", 25),
+            )
+        })
+        .collect();
+
+    let result = compile(&SchedulingProblem::new(vec![room], vec![], activities))
+        .unwrap()
+        .solve();
+
+    assert_eq!(result.status, SolveStatus::Infeasible);
+}
+
+#[test]
+fn minimum_capacity_in_a_named_dimension_filters_matching_resources() {
+    let small = Resource::new(ResourceId(1), "Small", 1)
+        .with_type("room")
+        .with_capacity_dimension("seats", 20);
+    let large = Resource::new(ResourceId(2), "Large", 1)
+        .with_type("room")
+        .with_capacity_dimension("seats", 30);
+    let unsized_room = Resource::new(ResourceId(3), "Unsized", 1).with_type("room");
+    let activity = Activity::new(ActivityId(1), "lesson", TimeWindow::new(0, 1), 1)
+        .with_requirement(
+            ResourceRequirement::matching("room", 1).with_minimum_capacity_in("seats", 25),
+        );
+
+    let solution = compile(&SchedulingProblem::new(
+        vec![small, large, unsized_room],
+        vec![],
+        vec![activity],
+    ))
+    .unwrap()
+    .solve()
+    .solution
+    .unwrap();
+
+    assert_eq!(solution.assignments[0].resources, vec![ResourceId(2)]);
+}
+
 #[test]
 fn participant_pool_chooses_a_non_conflicting_participant() {
     let first_teacher = Participant::new(ParticipantId(1), "Müller");

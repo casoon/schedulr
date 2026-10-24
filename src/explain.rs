@@ -181,7 +181,7 @@ impl CompiledProblem {
                             && requirement
                                 .resource_type()
                                 .is_none_or(|kind| kind == resource.resource_type())
-                            && resource.capacity() >= requirement.minimum_capacity()
+                            && requirement.fits_capacity_of(resource)
                             && requirement
                                 .required_features()
                                 .is_subset(resource.features())
