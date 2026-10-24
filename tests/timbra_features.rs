@@ -427,6 +427,42 @@ fn analyze_counts_participants_the_solver_still_chooses() {
     assert_eq!(required(3), Some(1));
 }
 
+/// Spreading demand over candidates must not round each share up: four one-slot activities that
+/// may use any of four rooms fill a quarter of the rooms' time, not all of it.
+#[test]
+fn analyze_spreads_demand_over_candidates_without_rounding_up() {
+    let rooms = (1..=4)
+        .map(|id| Resource::new(ResourceId(id), format!("room {id}"), 1).with_type("room"))
+        .collect();
+    let teachers = (1..=4)
+        .map(|id| Participant::new(ParticipantId(id), format!("teacher {id}")))
+        .collect();
+    let activities = (1..=4)
+        .map(|id| {
+            let teacher = (1..=4).fold(ParticipantRequirement::matching(), |requirement, id| {
+                requirement.with_candidate(ParticipantId(id))
+            });
+            Activity::new(ActivityId(id), "lesson", TimeWindow::new(0, 4), 1)
+                .with_requirement(ResourceRequirement::matching("room", 1))
+                .with_participant_requirement(teacher)
+        })
+        .collect();
+    let analysis = compile(&SchedulingProblem::new(rooms, teachers, activities))
+        .unwrap()
+        .analyze();
+
+    for bottleneck in &analysis.bottlenecks {
+        assert_eq!(bottleneck.required, 1, "{}", bottleneck.name);
+        assert!(
+            (bottleneck.utilization - 0.25).abs() < 1e-9,
+            "{}: {}",
+            bottleneck.name,
+            bottleneck.utilization
+        );
+    }
+    assert_eq!(analysis.feasibility_percent, 100.0);
+}
+
 #[test]
 fn analyze_runs_without_solving_and_repair_minimizes_changes() {
     let old_room = Resource::new(ResourceId(1), "Shared room", 2);

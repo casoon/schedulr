@@ -160,7 +160,9 @@ impl CompiledProblem {
                 Some(TimeWindow::new(start, end))
             });
         let horizon_duration = horizon.and_then(TimeWindow::duration).unwrap_or(0);
-        let mut required_by_resource: BTreeMap<ResourceId, u64> = BTreeMap::new();
+        // Demand spread over candidates stays fractional until the end: rounding each share up
+        // would charge a one-slot activity with twenty candidate rooms a full slot in each.
+        let mut required_by_resource: BTreeMap<ResourceId, f64> = BTreeMap::new();
         for activity in &self.problem.activities {
             for requirement in activity.requirements() {
                 let candidates = self
@@ -190,11 +192,11 @@ impl CompiledProblem {
                             && in_pool
                     })
                     .collect::<Vec<_>>();
-                let divisor = u64::try_from(candidates.len()).unwrap_or(1).max(1);
                 let demand = activity
                     .duration()
                     .saturating_mul(u64::from(requirement.units()))
-                    .div_ceil(divisor);
+                    as f64
+                    / candidates.len().max(1) as f64;
                 for resource in candidates {
                     *required_by_resource.entry(resource.id()).or_default() += demand;
                 }
@@ -213,7 +215,7 @@ impl CompiledProblem {
                 Bottleneck {
                     entity: EntityRef::Resource(resource.id()),
                     name: resource.name().to_string(),
-                    required,
+                    required: required.round() as u64,
                     available,
                     utilization: ratio(required, available),
                 }
@@ -222,16 +224,16 @@ impl CompiledProblem {
         let mut required_by_participant = BTreeMap::new();
         for activity in self.internal.activities.values() {
             for participant in activity.participants() {
-                *required_by_participant.entry(*participant).or_insert(0u64) += activity.duration();
+                *required_by_participant.entry(*participant).or_insert(0.0) +=
+                    activity.duration() as f64;
             }
             // A participant the solver still chooses from a requirement carries demand
             // too; like a resource requirement, it is spread over the candidates.
             for requirement in activity.participant_requirements() {
                 let candidates = resolve_participant_requirement(&self.problem, requirement);
-                let divisor = u64::try_from(candidates.len()).unwrap_or(1).max(1);
-                let demand = activity.duration().div_ceil(divisor);
+                let demand = activity.duration() as f64 / candidates.len().max(1) as f64;
                 for participant in candidates {
-                    *required_by_participant.entry(participant).or_insert(0u64) += demand;
+                    *required_by_participant.entry(participant).or_insert(0.0) += demand;
                 }
             }
         }
@@ -243,7 +245,7 @@ impl CompiledProblem {
             Bottleneck {
                 entity: EntityRef::Participant(participant.id()),
                 name: participant.name().to_string(),
-                required,
+                required: required.round() as u64,
                 available: horizon_duration,
                 utilization: ratio(required, horizon_duration),
             }
@@ -634,11 +636,11 @@ pub fn compare(before: &Solution, after: &Solution) -> SolutionComparison {
     }
 }
 
-fn ratio(required: u64, available: u64) -> f64 {
+fn ratio(required: f64, available: u64) -> f64 {
     if available == 0 {
-        if required == 0 { 0.0 } else { 1.0 }
+        if required == 0.0 { 0.0 } else { 1.0 }
     } else {
-        required as f64 / available as f64
+        required / available as f64
     }
 }
 

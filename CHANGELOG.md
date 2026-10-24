@@ -9,6 +9,12 @@ This file starts with 0.14.0; earlier releases are recorded by their git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Explain:** `analyze` spreads demand over candidate resources and participants as exact
+  shares instead of rounding each share up, so a one-slot activity with many candidate rooms no
+  longer counts as a full slot in every one of them.
+
 ## [0.14.0] - 2026-10-24
 
 ### Breaking
