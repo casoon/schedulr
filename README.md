@@ -14,7 +14,7 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 
 ## Status
 
-Version 0.8 is implemented. It provides:
+The current release is 0.14. It provides, among others:
 
 - domain-neutral `Resource`, `Participant`, `Activity`, `Assignment`,
   `Score`, and structured `Conflict` types without exposing solver internals;
@@ -103,7 +103,7 @@ if result.status != SolveStatus::Feasible {
 ## Installation
 
 ```toml
-schedulr = "0.11"
+schedulr = "0.14"
 ```
 
 ## License

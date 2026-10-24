@@ -1,9 +1,6 @@
 //! One training day with a lunch break, a trainer who is only available in the
 //! afternoon, and hard relations between activities.
 //!
-//! Breaks, availability ranges and activity relations were added after the
-//! 0.8.0 release; this example needs the current master branch.
-//!
 //! One time unit is one hour; hour 0 is Monday 00:00.
 //!
 //! Run with `cargo run --example relations_and_breaks`.

@@ -40,7 +40,7 @@ Everything below is exported from the crate root (`use schedulr::…`).
 <ApiEntry
   kind="fn"
   name="check"
-  since="unreleased"
+  since="since 0.9"
   signature={`pub fn check(&self, solution: &Solution) -> SolutionCheck`}
 >
   Evaluates every constraint against a complete or partial solution without changing it. A
@@ -89,11 +89,11 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | `Activity`, `ProposedActivity` | Batch demand, and one exact change for `SchedulingState` |
 | `ResourceRequirement`, `ParticipantRequirement` | Exact or solver-chosen resources and people |
 | `ParticipantConflictPolicy` | Whether a participant conflict blocks or is only reported |
-| `ScheduleTemplate`, `DayTemplate`, `SlotTemplate`, `BreakTemplate`, `AcademicPeriod` | Calendars (`BreakTemplate` unreleased) |
+| `ScheduleTemplate`, `DayTemplate`, `SlotTemplate`, `BreakTemplate`, `AcademicPeriod` | Calendars |
 | `ScoreRule`, `ScoreRuleKind`, `ScoreLevel` | Preferences |
-| `ActivityRelation`, `ActivityRelationConstraint` | Hard relations between activities (unreleased) |
+| `ActivityRelation`, `ActivityRelationConstraint` | Hard relations between activities |
 | `RepairOptions` | Settings for `repair`: start and assignment penalties, `frozen` activities, cancellation, time limit |
-| `RepairOutcome`, `RepairResult` | Whether `repair_with_outcome` repaired or fell back to `solve` (unreleased) |
+| `RepairOutcome`, `RepairResult` | Whether `repair_with_outcome` repaired or fell back to `solve` |
 
 ## Result types
 
@@ -101,7 +101,7 @@ Everything below is exported from the crate root (`use schedulr::…`).
 | --- | --- |
 | `SolveResult`, `SolveStatus`, `SolveStatistics` | Outcome of `solve` and `repair` |
 | `Solution`, `Assignment` | Placed activities with resources and participants |
-| `SolutionCheck` | Full verdict on one solution: feasibility, conflicts, score (unreleased) |
+| `SolutionCheck` | Full verdict on one solution: feasibility, conflicts, score |
 | `Score`, `ScoreComponent` | Aggregated score and per-rule contributions |
 | `Conflict`, `ConflictSeverity`, `EntityRef` | Structured conflicts, see [Conflicts and errors](../conflicts/) |
 | `CompileError` | All validation messages of a failed `compile` |

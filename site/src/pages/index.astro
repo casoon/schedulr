@@ -44,14 +44,14 @@ if result.status != SolveStatus::Feasible {
     <Install
       commands={[
         { label: 'cargo', command: 'cargo add schedulr' },
-        { label: 'Cargo.toml', command: 'schedulr = "0.8"' },
+        { label: 'Cargo.toml', command: 'schedulr = "0.14"' },
       ]}
     />
     <Badges>
       <Badge>MIT</Badge>
-      <Badge>crates.io 0.8.0</Badge>
+      <Badge>crates.io 0.14.0</Badge>
       <Badge>Rust 1.87+</Badge>
-      <Badge>built on unifier 0.3</Badge>
+      <Badge>built on unifier 0.6</Badge>
     </Badges>
     <Terminal slot="output" title="cargo run --example workshop_plan" dots ansi={plan} />
   </Hero>

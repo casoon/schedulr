@@ -28,9 +28,9 @@ const catalogue = [
     slug: 'relations-and-breaks',
     name: 'relations_and_breaks',
     title: 'Relations and breaks',
-    tags: ['relations', 'breaks', 'availability', 'unreleased'],
+    tags: ['relations', 'breaks', 'availability'],
     description:
-      'One training day with a lunch break, a trainer who is unavailable in the morning, and SameStart, Consecutive, Precedence and NoOverlap relations. These features are on master and not yet in the 0.8.0 release.',
+      'One training day with a lunch break, a trainer who is unavailable in the morning, and SameStart, Consecutive, Precedence and NoOverlap relations.',
   },
   {
     slug: 'explain-conflicts',
