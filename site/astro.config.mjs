@@ -13,7 +13,6 @@ export default defineConfig({
         'Scheduling framework for Rust: describe activities, resources and time windows, then solve, check or repair the plan with the unifier constraint solver.',
       tagline: 'Scheduling framework for Rust',
       repo: 'casoon/schedulr',
-      version: '0.14.0',
       license: 'MIT',
       branch: 'master',
       packages: [
