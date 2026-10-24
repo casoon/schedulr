@@ -274,7 +274,7 @@ fn evaluate(
         let count = placed.iter().filter(|(c, _, _)| *c == index).count();
         if count != course.lectures as usize {
             hard.push(format!(
-                "{}: {count} von {} Vorlesungen",
+                "{}: {count} of {} lectures",
                 course.id, course.lectures
             ));
         }
@@ -284,21 +284,21 @@ fn evaluate(
     let mut course_use = BTreeSet::new();
     for &(course, slot, room) in &placed {
         if !room_use.insert((slot, room)) {
-            hard.push(format!("Raum {room} doppelt in Slot {slot}"));
+            hard.push(format!("room {room} double-booked in slot {slot}"));
         }
         if !teacher_use.insert((slot, instance.courses[course].teacher.as_str())) {
-            hard.push(format!("Lehrkraft doppelt in Slot {slot}"));
+            hard.push(format!("teacher double-booked in slot {slot}"));
         }
         let id = &instance.courses[course].id;
         if !course_use.insert((slot, course)) {
-            hard.push(format!("Kurs {id} doppelt in Slot {slot}"));
+            hard.push(format!("course {id} double-booked in slot {slot}"));
         }
         if instance
             .unavailable
             .iter()
             .any(|(c, day, period)| c == id && day * periods + period == slot)
         {
-            hard.push(format!("{id} in gesperrtem Slot {slot}"));
+            hard.push(format!("{id} in unavailable slot {slot}"));
         }
     }
     for (curriculum, (name, members)) in instance.curricula.iter().enumerate() {
@@ -309,7 +309,7 @@ fn evaluate(
             .collect();
         let distinct: BTreeSet<i64> = busy.iter().copied().collect();
         if distinct.len() != busy.len() {
-            hard.push(format!("Curriculum {name} ({curriculum}) doppelt belegt"));
+            hard.push(format!("curriculum {name} ({curriculum}) double-booked"));
         }
     }
 
@@ -378,14 +378,14 @@ fn solve(name: &str, best_known: u32) {
     let seconds = started.elapsed().as_secs_f64();
     let solution = result.solution.unwrap_or_else(|| {
         panic!(
-            "{name}: kein hart gültiger Plan in {budget} s ({:?})",
+            "{name}: no hard-feasible schedule in {budget} s ({:?})",
             result.status
         )
     });
     let (hard, penalty) = evaluate(&instance, &solution, &course_of);
     println!(
-        "{name}: {seconds:.1} s, {} harte Verstöße, ITC-Strafe {} (Bestwert {best_known}): \
-         Kapazität {}, Mindesttage {}, Kompaktheit {}, Raumstabilität {}",
+        "{name}: {seconds:.1} s, {} hard violations, ITC penalty {} (best known {best_known}): \
+         capacity {}, min working days {}, compactness {}, room stability {}",
         hard.len(),
         penalty.iter().sum::<u32>(),
         penalty[0],

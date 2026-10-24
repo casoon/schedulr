@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 /// that makes atomicity observable: a one-sided move is blocked, the swap of both is not.
 fn fixture() -> CompiledProblem {
     let requirement = ResourceRequirement::matching("room", 1);
-    let first = Activity::new(ActivityId(1), "Mathematik 10A", TimeWindow::new(0, 4), 1)
+    let first = Activity::new(ActivityId(1), "Maths 10A", TimeWindow::new(0, 4), 1)
         .with_requirement(requirement.clone());
-    let second = Activity::new(ActivityId(2), "Deutsch 10B", TimeWindow::new(0, 4), 1)
+    let second = Activity::new(ActivityId(2), "German 10B", TimeWindow::new(0, 4), 1)
         .with_requirement(requirement);
     compile(&SchedulingProblem::new(
         vec![Resource::new(ResourceId(1), "A204", 1).with_type("room")],
@@ -145,9 +145,9 @@ fn evaluating_changes_never_mutates_the_starting_solution() {
 #[test]
 fn a_swap_of_unequal_durations_is_rejected() {
     let requirement = ResourceRequirement::matching("room", 1);
-    let double = Activity::new(ActivityId(1), "Doppelstunde", TimeWindow::new(0, 4), 2)
+    let double = Activity::new(ActivityId(1), "double period", TimeWindow::new(0, 4), 2)
         .with_requirement(requirement.clone());
-    let single = Activity::new(ActivityId(2), "Einzelstunde", TimeWindow::new(0, 4), 1)
+    let single = Activity::new(ActivityId(2), "single period", TimeWindow::new(0, 4), 1)
         .with_requirement(requirement);
     let compiled = compile(&SchedulingProblem::new(
         vec![Resource::new(ResourceId(1), "A204", 1).with_type("room")],
@@ -204,9 +204,9 @@ fn a_window_outside_the_activity_domain_is_rejected() {
 #[test]
 fn score_components_are_reported_per_stable_category() {
     let requirement = ResourceRequirement::matching("room", 1);
-    let first = Activity::new(ActivityId(1), "Mathematik 10A", TimeWindow::new(0, 4), 1)
+    let first = Activity::new(ActivityId(1), "Maths 10A", TimeWindow::new(0, 4), 1)
         .with_requirement(requirement.clone());
-    let second = Activity::new(ActivityId(2), "Deutsch 10B", TimeWindow::new(0, 4), 1)
+    let second = Activity::new(ActivityId(2), "German 10B", TimeWindow::new(0, 4), 1)
         .with_requirement(requirement);
     let problem = SchedulingProblem::new(
         vec![Resource::new(ResourceId(1), "A204", 1).with_type("room")],
@@ -214,7 +214,7 @@ fn score_components_are_reported_per_stable_category() {
         vec![first, second],
     )
     .with_score_rule(ScoreRule::prefer_window(
-        "Freistunden Lehrkraft",
+        "teacher free periods",
         ScoreLevel::Strong,
         ActivityId(1),
         TimeWindow::new(3, 4),
@@ -234,7 +234,7 @@ fn score_components_are_reported_per_stable_category() {
     // The category is the stable key the UI groups by — not a localized sentence.
     assert!(
         evaluation.score_components.iter().any(|component| {
-            component.category == "Freistunden Lehrkraft" && component.level == ScoreLevel::Strong
+            component.category == "teacher free periods" && component.level == ScoreLevel::Strong
         }),
         "{:?}",
         evaluation

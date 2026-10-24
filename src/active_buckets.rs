@@ -1,7 +1,7 @@
-//! Wie viele Buckets ein Träger überhaupt belegt — „an höchstens vier Tagen“ (timbra plan/62, G6).
+//! How many buckets a holder occupies at all — "on at most four days" (timbra plan/62, G6).
 //!
-//! Anders als eine Tageslast fragt das nicht, *wie viel* in einem Bucket liegt, sondern *ob*
-//! etwas darin liegt. Welche Buckets frei bleiben, entscheidet die Suche.
+//! Unlike a daily load, this does not ask *how much* lies in a bucket, but *whether* anything
+//! lies in it. Which buckets stay free is left to the search.
 
 use std::collections::{BTreeSet, HashMap};
 use unifier::VariableId;
@@ -44,8 +44,8 @@ impl ActiveBucketLimit {
             .collect()
     }
 
-    /// Die Buckets, in denen eine bereits entschiedene, anwesende Aufgabe liegt. Monoton: mehr
-    /// Belegtes kann nur mehr Buckets ergeben — ein Zuviel auf einer Teilbelegung bleibt eins.
+    /// The buckets containing an already decided, present task. Monotone: more occupied tasks
+    /// can only yield more buckets — an excess on a partial assignment remains one.
     fn active(&self, assignment: &HashMap<VariableId, i64>) -> BTreeSet<usize> {
         let mut buckets = BTreeSet::new();
         for task in &self.tasks {
@@ -77,7 +77,7 @@ impl Constraint for ActiveBucketLimit {
         self.active(assignment).len() <= self.limit
     }
 
-    /// Wie viele Buckets zu viel belegt sind: wer einen Tag räumt, sieht die Suche.
+    /// How many buckets are occupied beyond the limit: clearing a day is visible to the search.
     fn violations(&self, assignment: &HashMap<VariableId, i64>) -> u32 {
         u32::try_from(self.active(assignment).len().saturating_sub(self.limit)).unwrap_or(u32::MAX)
     }
@@ -94,10 +94,10 @@ impl Constraint for ActiveBucketLimit {
         })
     }
 
-    /// Sind so viele Buckets sicher belegt, wie erlaubt, dürfen die übrigen sicher anwesenden
-    /// Aufgaben nur noch dort liegen — Starts, deren Intervall einen anderen Bucket berührt,
-    /// fallen weg. Sicher belegt heißt: Aufgabe sicher anwesend und ihr Start entschieden. Mehr
-    /// sicher belegte Buckets als erlaubt ist ein Konflikt.
+    /// Once as many buckets are surely occupied as allowed, the remaining surely present tasks may
+    /// only lie there — starts whose interval touches another bucket are removed. Surely occupied
+    /// means: task surely present and its start decided. More surely occupied buckets than
+    /// allowed is a conflict.
     fn propagate(&self, domains: &mut TrailedDomains) -> PropagationResult {
         let surely_present = |task: &BucketedTask, domains: &TrailedDomains| match task.presence {
             None => true,

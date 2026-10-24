@@ -31,7 +31,7 @@ fn starts(window: TimeWindow, count: u64) -> Vec<i64> {
         SchedulingProblem::new(vec![], vec![], activities).with_schedule_template(three_days());
     for id in 1..=count {
         problem = problem.with_score_rule(ScoreRule::prefer_within_bucket(
-            "nicht zuerst",
+            "not first",
             ScoreLevel::Medium,
             ActivityId(id),
             1,
@@ -76,7 +76,7 @@ fn an_avoided_stretch_stays_empty() {
         SchedulingProblem::new(vec![], vec![], activities).with_schedule_template(three_days());
     for id in 1..=3 {
         problem = problem.with_score_rule(ScoreRule::avoid_within_bucket(
-            "nicht nach der Pause",
+            "not after the break",
             ScoreLevel::Medium,
             ActivityId(id),
             2,

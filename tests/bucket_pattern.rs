@@ -10,7 +10,7 @@ use schedulr::{
 fn a_soft_pattern_charges_the_distance_instead_of_failing() {
     let mut problem = two_singles_on_separate_days(vec![vec![2]]);
     problem.bucket_load_patterns[0].penalty =
-        Some(SoftPenalty::new("Doppelstunden", ScoreLevel::Weak, 3));
+        Some(SoftPenalty::new("double periods", ScoreLevel::Weak, 3));
 
     let result = compile(&problem).expect("the problem compiles").solve();
     assert_eq!(result.status, SolveStatus::Feasible);
@@ -18,7 +18,7 @@ fn a_soft_pattern_charges_the_distance_instead_of_failing() {
     let charged: i64 = solution
         .score_components
         .iter()
-        .filter(|component| component.category == "Doppelstunden")
+        .filter(|component| component.category == "double periods")
         .map(|component| component.value)
         .sum();
     assert_eq!(charged, -6, "distance 2 to [2], at weight 3");
@@ -40,7 +40,7 @@ fn a_soft_pattern_still_places_two_periods_adjacent() {
         .with_schedule_template(template)
         .with_bucket_load_pattern(
             BucketLoadPattern::new(vec![ActivityId(1), ActivityId(2)], vec![vec![2]])
-                .soft(SoftPenalty::new("Doppelstunden", ScoreLevel::Weak, 1)),
+                .soft(SoftPenalty::new("double periods", ScoreLevel::Weak, 1)),
         );
 
     let solution = compile(&problem)

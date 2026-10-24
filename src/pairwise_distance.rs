@@ -1,9 +1,9 @@
-//! Mindestabstand zwischen allen Starts eines Trägers als **eine** Bedingung — die weiche Form
-//! von `MinimumBreak` (timbra plan/69, Schritt 0).
+//! Minimum distance between all starts of a holder as **one** constraint — the soft form of
+//! `MinimumBreak` (timbra plan/69, step 0).
 //!
-//! Die harte Form legt je Paar ein `MinimumDistance` an. Als Wunsch wäre das je Paar ein eigenes
-//! Ziel, und Ziele werden bei jedem Zug durchsucht: bei n Terminen n(n-1)/2 Stück. Hier zählt eine
-//! Bedingung alle Paare, die zu nah liegen.
+//! The hard form posts one `MinimumDistance` per pair. As a preference that would be a separate
+//! objective per pair, and objectives are scanned on every move: n(n-1)/2 of them for n
+//! appointments. Here one constraint counts all pairs that are too close.
 
 use std::collections::HashMap;
 use unifier::VariableId;
@@ -29,8 +29,8 @@ impl PairwiseDistance {
         }
     }
 
-    /// Paare zugewiesener Starts mit `|a - b| < min_distance`. Sortiert, dann zwei Zeiger:
-    /// O(n log n) statt O(n²).
+    /// Pairs of assigned starts with `|a - b| < min_distance`. Sorted, then two pointers:
+    /// O(n log n) instead of O(n²).
     fn close_pairs(&self, assignment: &HashMap<VariableId, i64>) -> u32 {
         let mut values: Vec<i64> = self
             .starts
@@ -64,12 +64,12 @@ impl Constraint for PairwiseDistance {
         self.close_pairs(assignment) == 0
     }
 
-    /// Jedes zu nahe Paar zählt: wer einen Termin wegschiebt, sieht die Suche.
+    /// Every pair that is too close counts: moving one appointment away is visible to the search.
     fn violations(&self, assignment: &HashMap<VariableId, i64>) -> u32 {
         self.close_pairs(assignment)
     }
 
-    /// Wird nur als Wunsch eingesetzt; die harte Form filtert über die Paar-Bedingungen.
+    /// Only used as a preference; the hard form filters through the pairwise constraints.
     fn propagate(&self, _domains: &mut TrailedDomains) -> PropagationResult {
         PropagationResult::Success { changed: false }
     }
@@ -83,7 +83,7 @@ mod tests {
     fn counts_every_pair_closer_than_the_distance() {
         let vars = [VariableId(0), VariableId(1), VariableId(2), VariableId(3)];
         let rule = PairwiseDistance::new(vars.to_vec(), 2);
-        // 0,1,2 liegen paarweise teils zu nah: (0,1), (1,2); 0 und 2 haben Abstand 2 — genug.
+        // Some pairs of 0,1,2 are too close: (0,1), (1,2); 0 and 2 are 2 apart — enough.
         let assignment = HashMap::from([(vars[0], 0), (vars[1], 1), (vars[2], 2), (vars[3], 10)]);
         assert_eq!(rule.violations(&assignment), 2);
 

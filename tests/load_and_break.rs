@@ -24,7 +24,7 @@ fn a_soft_daily_load_charges_the_excess_instead_of_failing() {
     let problem = SchedulingProblem::new(vec![], vec![teacher.clone()], lessons)
         .with_maximum_daily_load(
             MaximumDailyLoad::for_participant(teacher.id(), 1).soft(SoftPenalty::new(
-                "Tageslast",
+                "daily load",
                 ScoreLevel::Medium,
                 4,
             )),
@@ -37,7 +37,7 @@ fn a_soft_daily_load_charges_the_excess_instead_of_failing() {
     let charged: i64 = solution
         .score_components
         .iter()
-        .filter(|component| component.category == "Tageslast")
+        .filter(|component| component.category == "daily load")
         .map(|component| component.value)
         .sum();
     assert_eq!(charged, -8, "two units over a limit of 1, at weight 4");
@@ -55,7 +55,7 @@ fn a_soft_daily_load_still_spreads_when_it_can() {
         .with_calendar(period(0, 7), two_day_template())
         .with_maximum_daily_load(
             MaximumDailyLoad::for_participant(ParticipantId(1), 1).soft(SoftPenalty::new(
-                "Tageslast",
+                "daily load",
                 ScoreLevel::Medium,
                 1,
             )),

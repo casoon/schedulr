@@ -97,13 +97,12 @@ pub enum SolveStrategy {
 /// unseeded optimizer run, which is exactly what a single-phase search would have done.
 const CONSTRUCTION_BUDGET_DIVISOR: u32 = 2;
 
-/// Der Anteil der Konstruktionsphase, den die gierige Platzierung höchstens verbraucht, bevor
-/// die Reparatur übernimmt. Ein Anlauf kostet Millisekunden; die Grenze greift erst bei sehr
-/// großen Modellen.
+/// The share of the construction phase the greedy placement uses at most before the repair takes
+/// over. One attempt costs milliseconds; the limit only kicks in on very large models.
 const GREEDY_BUDGET_DIVISOR: u32 = 10;
 
-/// Der Anteil der Konstruktionsphase, den die Baumsuche vorab bekommt — genug, um ein kleines
-/// Modell zu lösen oder zu widerlegen, zu wenig, um auf einem großen die Zeit zu verbrauchen.
+/// The share of the construction phase the tree search gets up front — enough to solve or refute
+/// a small model, too little to use up the time on a large one.
 const QUICK_TREE_BUDGET_DIVISOR: u32 = 10;
 
 fn solver_options(time_limit: Option<Duration>, options: &SolveOptions) -> SolverOptions {
@@ -140,11 +139,10 @@ pub(crate) struct InternalCompiled {
     pub(crate) fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>>,
     selected_capacity_constraints: Vec<(ConstraintId, Arc<SelectedResourceCapacity>)>,
     constraint_entities: HashMap<ConstraintId, EntityRef>,
-    /// Die Constraints, die eine **Verfügbarkeit** durchsetzen (Kalendersperren), nicht eine
-    /// Kollision. Sie gehören einer Person oder einer Ressource und tragen deshalb deren Namen —
-    /// ihre Schwere folgt aber nicht der Kollisionspolitik: dass zwei Stunden derselben Person
-    /// kollidieren, darf eine Schule als Hinweis werten; dass eine Stunde in einer Zeit liegt, in
-    /// der es diese Person nicht gibt, nicht.
+    /// The constraints that enforce an **availability** (calendar closures), not a collision.
+    /// They belong to a person or a resource and therefore carry its name — but their severity
+    /// does not follow the collision policy: a school may treat two lessons of the same person
+    /// colliding as a warning; a lesson lying in a time when that person does not exist, not.
     calendar_constraints: HashSet<ConstraintId>,
     /// Resolved from [`SchedulingProblem::participant_conflict_policy`] once, at compile time.
     participant_conflict_severity: ConflictSeverity,
@@ -261,17 +259,18 @@ impl CompiledProblem {
         let mut outcome = if optimized.solution.is_some() {
             optimized
         } else {
-            // Die Konstruktion ist der Rückfall — aber die Auskunft *wie weit* steckt im
-            // Optimierer: er hat auf ihrem Ergebnis weitergearbeitet und weiß als Einziger,
-            // wie nah der Lauf am Ende kam. Ohne diese Zeile fiel sie hier lautlos heraus,
-            // und der Aufrufer bekam „kein Plan" statt „so weit kam ich" (plan/51, B4).
+            // The construction is the fallback — but the information *how far* lives in the
+            // optimizer: it kept working on the construction's result and is the only one that
+            // knows how close the run came to the end. Without this line it silently dropped out
+            // here, and the caller got "no schedule" instead of "this is how far I got"
+            // (plan/51, B4).
             let reached = optimized.best_effort;
             let mut fallback = construction;
-            // Haben beide nur eine Beinahe-Lösung, zählt die nähere. Die der Konstruktion ist
-            // ihr tiefster Abstieg, der Rest mit Erstwerten aufgefüllt; das Portfolio hat danach
-            // mit Local Search weitergearbeitet. Vorher gewann die Konstruktion, sobald sie
-            // überhaupt eine hatte — auf 580 Terminen gab ein 300-s-Lauf so denselben Stand
-            // zurück wie ein 20-s-Lauf, alle Termine in der ersten Stunde (timbra plan/61).
+            // If both have only a near-solution, the closer one counts. The construction's is its
+            // deepest descent, the rest filled with first values; the portfolio then kept working
+            // on it with local search. Previously the construction won as soon as it had one at
+            // all — on 580 appointments a 300 s run thus returned the same state as a 20 s run,
+            // all appointments in the first hour (timbra plan/61).
             if fallback.solution.is_none() {
                 fallback.best_effort = match (fallback.best_effort.take(), reached) {
                     (Some(own), Some(other)) => {
@@ -290,18 +289,17 @@ impl CompiledProblem {
         outcome
     }
 
-    /// Phase eins: erst kurz die Baumsuche, dann eine gierige Platzierung über Aktivitäten
-    /// (`construct.rs`), von Local Search repariert.
+    /// Phase one: first a short tree search, then a greedy placement over activities
+    /// (`construct.rs`), repaired by local search.
     ///
-    /// Die Baumsuche zuerst, weil sie auf kleinen Modellen in Millisekunden einen Plan findet
-    /// oder beweist, dass es keinen gibt — die Reparatur kann das nicht beweisen. Auf großen
-    /// Modellen setzt sie Variable für Variable und kam auf 580 Aktivitäten nicht an einen
-    /// gültigen Plan heran, den die gierige Platzierung, die je Aktivität Start, Ressourcen und
-    /// Teilnehmer zusammen festlegt, in Millisekunden fand (timbra plan/61). Deshalb bekommt sie
-    /// nur ein Zehntel.
+    /// The tree search first, because on small models it finds a schedule in milliseconds or
+    /// proves that none exists — the repair cannot prove that. On large models it assigns
+    /// variable by variable and on 580 activities did not get near a feasible schedule, which the
+    /// greedy placement, deciding start, resources and participants together per activity, found
+    /// in milliseconds (timbra plan/61). That is why it only gets a tenth.
     ///
-    /// Ohne Zeitlimit bleibt es bei der Baumsuche: die Reparatur hört mit Zielen erst beim
-    /// Limit auf.
+    /// Without a time limit it stays with the tree search: the repair, with objectives, only stops
+    /// at the limit.
     fn construct(&self, limit: Option<Duration>, options: &SolveOptions) -> SolveOutcome {
         let graph = &self.internal.graph;
         let Some(limit) = limit else {
@@ -316,7 +314,7 @@ impl CompiledProblem {
             return tree;
         }
         let remaining = limit.saturating_sub(started.elapsed());
-        // Höchstens ein Zehntel des Rests fürs Legen; die Reparatur bekommt, was bleibt.
+        // At most a tenth of the remainder for placing; the repair gets whatever is left.
         let deadline = Instant::now() + remaining / GREEDY_BUDGET_DIVISOR;
         let Some(start) = self.internal.greedy_start(&self.problem, Some(deadline)) else {
             return BacktrackingSolver::new()
@@ -328,7 +326,7 @@ impl CompiledProblem {
             &solver_options(Some(limit.saturating_sub(started.elapsed())), options),
         );
         if repaired.solution.is_none() {
-            // Keine der beiden kam durch: die nähere Beinahe-Lösung zählt.
+            // Neither of the two got through: the closer near-solution counts.
             repaired.best_effort = match (repaired.best_effort.take(), tree.best_effort) {
                 (Some(own), Some(other)) => Some(if other.score > own.score { other } else { own }),
                 (own, other) => own.or(other),
@@ -442,9 +440,9 @@ fn build_problem_internal(
     let mut flexible_participant_requirements = Vec::new();
     let mut fixed_resources: BTreeMap<ActivityId, Vec<ResourceId>> = BTreeMap::new();
     let mut fixed_participants: BTreeMap<ActivityId, Vec<ParticipantId>> = BTreeMap::new();
-    // Wem eine Kalendersperre gehört. Ohne diese Zuordnung meldet ein verletzter Kalender nur
-    // "ForbiddenValues constraint is violated" — wahr und unbrauchbar. Die Map, die daraus die
-    // Namen zieht, entsteht erst nach dem Kompilieren, also wird hier gesammelt.
+    // Who a calendar closure belongs to. Without this mapping a violated calendar only reports
+    // "ForbiddenValues constraint is violated" — true and useless. The map that pulls the names
+    // from it is only built after compiling, so they are collected here.
     let mut calendar_entities: Vec<(ConstraintId, EntityRef)> = Vec::new();
 
     for activity in &expanded_activities {
@@ -468,12 +466,11 @@ fn build_problem_internal(
                 interval.start(),
                 template.cycle_length,
                 template.allowed_starts_for(activity.duration()),
-                // Eine Sperre des Kalenders ist ein Fenster, das **niemand belegen darf** — nicht
-                // bloß eines, in dem nichts beginnen darf. `PeriodicValues` verbietet Startwerte,
-                // also wird die Sperre um die Dauer nach vorn verbreitert: eine Aktivität der
-                // Länge d, die bei s beginnt, belegt [s, s+d) und trifft die geschlossene Sperre
-                // [a, b] genau dann, wenn s >= a - d + 1 und s <= b. Ohne das liefe eine
-                // Doppelstunde, die davor beginnt, mitten hinein.
+                // A calendar closure is a window that **nobody may occupy** — not merely one in
+                // which nothing may start. `PeriodicValues` forbids start values, so the closure is
+                // widened forwards by the duration: an activity of length d starting at s occupies
+                // [s, s+d) and hits the closure's closed range [a, b] exactly when
+                // s >= a - d + 1 and s <= b. Without that, a double lesson starting before it would run right into it.
                 template
                     .unavailable_ranges
                     .iter()
@@ -1221,8 +1218,7 @@ fn build_problem_internal(
         if anchor.is_empty() {
             continue;
         }
-        // Gemeinsam ist eine Aufgabe, die beide haben — dieselbe Startvariable —, anwesend, wenn
-        // beide es sind.
+        // A shared task is one both have — the same start variable —, present if both are.
         let companion = tasks_for(goal.companion);
         let joint: Vec<JointTask> = anchor
             .iter()
@@ -1774,8 +1770,8 @@ impl InternalCompiled {
                 let is_calendar = self.calendar_constraints.contains(&violation.constraint_id);
                 let (severity, entity_name) = match entity {
                     Some(EntityRef::Participant(id)) => (
-                        // Eine verletzte Verfügbarkeit ist immer blockierend; nur eine Kollision
-                        // folgt der Politik des Aufrufers (siehe `calendar_constraints`).
+                        // A violated availability is always blocking; only a collision follows
+                        // the caller's policy (see `calendar_constraints`).
                         if is_calendar {
                             ConflictSeverity::Blocking
                         } else {

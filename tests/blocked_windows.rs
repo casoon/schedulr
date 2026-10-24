@@ -23,7 +23,7 @@ fn lesson_for_ben(duration: u64) -> CompiledProblem {
             Participant::new(ParticipantId(2), "Cara"),
         ],
         vec![
-            Activity::new(ActivityId(1), "Mathematik", TimeWindow::new(0, 6), duration)
+            Activity::new(ActivityId(1), "Maths", TimeWindow::new(0, 6), duration)
                 .with_participant(ParticipantId(1)),
         ],
     );
@@ -79,21 +79,21 @@ fn blocked_starts_and_occupies_describe_the_same_slots() {
 
 #[test]
 fn a_single_lesson_avoids_the_blocked_hour_but_not_its_neighbours() {
-    assert!(!may_start_at(1, 3), "die gesperrte Stunde selbst");
-    assert!(may_start_at(1, 2), "unmittelbar davor");
-    assert!(may_start_at(1, 4), "unmittelbar danach");
+    assert!(!may_start_at(1, 3), "the blocked hour itself");
+    assert!(may_start_at(1, 2), "immediately before");
+    assert!(may_start_at(1, 4), "immediately after");
 }
 
 #[test]
 fn a_long_lesson_may_not_reach_into_the_blocked_hour() {
     // Two hours starting at 2 would run through the blocked hour 3 — that is the whole point of
     // the block, and exactly what a start-only range would have let through.
-    assert!(!may_start_at(2, 2), "läuft in die gesperrte Stunde hinein");
+    assert!(!may_start_at(2, 2), "runs into the blocked hour");
     assert!(
         may_start_at(2, 1),
-        "endet genau mit dem Beginn der Sperre — halboffen erlaubt"
+        "ends exactly where the block begins — allowed, half-open"
     );
-    assert!(may_start_at(2, 4), "beginnt genau am Ende der Sperre");
+    assert!(may_start_at(2, 4), "begins exactly where the block ends");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn a_blocked_candidate_is_not_chosen_for_that_slot() {
             Participant::new(ParticipantId(2), "Cara"),
         ],
         vec![
-            Activity::new(ActivityId(1), "Mathematik", TimeWindow::new(3, 4), 1)
+            Activity::new(ActivityId(1), "Maths", TimeWindow::new(3, 4), 1)
                 .with_participant_requirement(ParticipantRequirement::matching()),
         ],
     );
@@ -125,7 +125,7 @@ fn a_blocked_room_is_avoided_like_a_blocked_person() {
         vec![Resource::new(ResourceId(1), "A204", 1).with_blocked_window(TimeWindow::new(3, 4))],
         vec![],
         vec![
-            Activity::new(ActivityId(1), "Mathematik", TimeWindow::new(0, 6), 1)
+            Activity::new(ActivityId(1), "Maths", TimeWindow::new(0, 6), 1)
                 .with_requirement(ResourceRequirement::new(ResourceId(1), 1)),
         ],
     );
@@ -162,7 +162,7 @@ fn the_start_semantics_of_an_unavailable_range_are_unchanged() {
         vec![],
         vec![Participant::new(ParticipantId(1), "Ben").with_unavailable_range(3, 3)],
         vec![
-            Activity::new(ActivityId(1), "Besprechung", TimeWindow::new(0, 6), 2)
+            Activity::new(ActivityId(1), "Meeting", TimeWindow::new(0, 6), 2)
                 .with_participant(ParticipantId(1)),
         ],
     );
@@ -184,8 +184,8 @@ fn the_start_semantics_of_an_unavailable_range_are_unchanged() {
             .is_feasible
     };
 
-    assert!(!moved(3), "der Start liegt in der Sperre");
-    assert!(moved(2), "ragt in die Sperre hinein, darf aber starten");
+    assert!(!moved(3), "the start lies inside the block");
+    assert!(moved(2), "reaches into the block, but may start");
 }
 
 /// A closure of the calendar is occupancy-aware: a double lesson may not *reach into* it.
@@ -201,12 +201,12 @@ fn a_closed_range_in_the_calendar_cannot_be_reached_into() {
         let mut day = DayTemplate::new(0);
         for period in 0..6 {
             day = day.with_slot(SlotTemplate::new(
-                format!("{}. Stunde", period + 1),
+                format!("period {}", period + 1),
                 period,
                 (6 - period) as u64,
             ));
         }
-        // Die 4. Stunde (Slot 3) ist geschlossen.
+        // The 4th hour (slot 3) is closed.
         let template = ScheduleTemplate::new(6)
             .with_day(day)
             .with_unavailable_range(3, 3);
@@ -214,7 +214,7 @@ fn a_closed_range_in_the_calendar_cannot_be_reached_into() {
             vec![],
             vec![Participant::new(ParticipantId(1), "Ben")],
             vec![
-                Activity::new(ActivityId(1), "Mathematik", TimeWindow::new(0, 6), duration)
+                Activity::new(ActivityId(1), "Maths", TimeWindow::new(0, 6), duration)
                     .with_participant(ParticipantId(1)),
             ],
         )
@@ -236,14 +236,14 @@ fn a_closed_range_in_the_calendar_cannot_be_reached_into() {
             .is_feasible
     };
 
-    // Eine Einzelstunde: nur der geschlossene Slot selbst fällt weg.
-    assert!(may_start_at(1, 2), "die 3. Stunde bleibt frei");
-    assert!(!may_start_at(1, 3), "die 4. Stunde ist geschlossen");
-    assert!(may_start_at(1, 4), "die 5. Stunde bleibt frei");
+    // A single lesson: only the closed slot itself is removed.
+    assert!(may_start_at(1, 2), "the 3rd hour stays free");
+    assert!(!may_start_at(1, 3), "the 4th hour is closed");
+    assert!(may_start_at(1, 4), "the 5th hour stays free");
 
-    // Eine Doppelstunde: auch der Beginn davor fällt weg, weil sie hineinreichen würde.
-    assert!(may_start_at(2, 1), "1.–2. Stunde bleibt möglich");
-    assert!(!may_start_at(2, 2), "3.–4. Stunde reicht in die Sperre");
-    assert!(!may_start_at(2, 3), "4.–5. Stunde beginnt in der Sperre");
-    assert!(may_start_at(2, 4), "5.–6. Stunde bleibt möglich");
+    // A double lesson: the start before it is removed too, because it would reach into it.
+    assert!(may_start_at(2, 1), "hours 1–2 remain possible");
+    assert!(!may_start_at(2, 2), "hours 3–4 reach into the block");
+    assert!(!may_start_at(2, 3), "hours 4–5 begin inside the block");
+    assert!(may_start_at(2, 4), "hours 5–6 remain possible");
 }

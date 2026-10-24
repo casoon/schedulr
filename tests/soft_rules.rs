@@ -9,7 +9,7 @@ use schedulr::{
     SolveStatus, TimeWindow, compile,
 };
 
-const CATEGORY: &str = "Wunsch";
+const CATEGORY: &str = "preference";
 
 fn penalty(weight: i64) -> SoftPenalty {
     SoftPenalty::new(CATEGORY, ScoreLevel::Medium, weight)

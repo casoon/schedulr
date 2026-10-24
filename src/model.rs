@@ -1011,7 +1011,7 @@ impl ActivityRelationConstraint {
 }
 
 /// Blueprint for expanding one template [`Activity`] into several instances that repeat every
-/// `step` time units, each on the same relative position (plan 28, "Engine (`schedulr`, generisch)").
+/// `step` time units, each on the same relative position (plan 28, "Engine (`schedulr`, generic)").
 ///
 /// The caller names the instances: `instances` is a list of `(k, id)` pairs where `k` is the
 /// instance index — **not** the position in the vector — and `id` the [`ActivityId`] the instance

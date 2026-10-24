@@ -31,7 +31,7 @@ fn day_of_one_class(limit: bool) -> SchedulingProblem {
             .with_schedule_template(one_day());
     if limit {
         problem = problem.with_consecutive_run_limit(ConsecutiveRunLimit::new(
-            "Hauptfächer am Stück",
+            "core subjects in a row",
             ScoreLevel::Medium,
             1,
             vec![ActivityId(1), ActivityId(2), ActivityId(3)],

@@ -48,7 +48,7 @@ fn free_time_lands_inside_the_band() {
     let solution = solve(
         (1..=3).map(|id| lesson(id, 0, 6)).collect(),
         IdleBounds::new(
-            "Freistunden",
+            "free periods",
             ScoreLevel::Medium,
             EntityRef::Participant(PERSON),
             1,
@@ -67,7 +67,7 @@ fn a_long_gap_is_split() {
     let solution = solve(
         vec![lesson(1, 0, 1), lesson(2, 3, 4), lesson(3, 0, 6)],
         IdleBounds::new(
-            "Freistunden",
+            "free periods",
             ScoreLevel::Medium,
             EntityRef::Participant(PERSON),
             0,

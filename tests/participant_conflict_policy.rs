@@ -17,9 +17,9 @@ fn one_person_two_lessons(policy: ParticipantConflictPolicy) -> CompiledProblem 
         vec![],
         vec![Participant::new(ParticipantId(1), "Alex")],
         vec![
-            Activity::new(ActivityId(1), "Mathematik 10A", TimeWindow::new(0, 4), 1)
+            Activity::new(ActivityId(1), "Maths 10A", TimeWindow::new(0, 4), 1)
                 .with_participant(ParticipantId(1)),
-            Activity::new(ActivityId(2), "Deutsch 10B", TimeWindow::new(0, 4), 1)
+            Activity::new(ActivityId(2), "German 10B", TimeWindow::new(0, 4), 1)
                 .with_participant(ParticipantId(1)),
         ],
     )
@@ -35,11 +35,11 @@ fn one_person_two_lessons_from_pool(policy: ParticipantConflictPolicy) -> Compil
         vec![],
         vec![Participant::new(ParticipantId(1), "Alex")],
         vec![
-            Activity::new(ActivityId(1), "Mathematik 10A", TimeWindow::new(0, 4), 1)
+            Activity::new(ActivityId(1), "Maths 10A", TimeWindow::new(0, 4), 1)
                 .with_participant_requirement(ParticipantRequirement::from_pool(
                     ParticipantPoolId(1),
                 )),
-            Activity::new(ActivityId(2), "Deutsch 10B", TimeWindow::new(0, 4), 1)
+            Activity::new(ActivityId(2), "German 10B", TimeWindow::new(0, 4), 1)
                 .with_participant_requirement(ParticipantRequirement::from_pool(
                     ParticipantPoolId(1),
                 )),
@@ -132,12 +132,10 @@ fn a_policy_that_does_not_apply_leaves_everything_else_alone() {
         vec![schedulr::Resource::new(schedulr::ResourceId(1), "A204", 1)],
         vec![Participant::new(ParticipantId(1), "Alex")],
         vec![
-            Activity::new(ActivityId(1), "Mathematik 10A", TimeWindow::new(0, 4), 1)
-                .with_requirement(schedulr::ResourceRequirement::new(
-                    schedulr::ResourceId(1),
-                    1,
-                )),
-            Activity::new(ActivityId(2), "Deutsch 10B", TimeWindow::new(0, 4), 1).with_requirement(
+            Activity::new(ActivityId(1), "Maths 10A", TimeWindow::new(0, 4), 1).with_requirement(
+                schedulr::ResourceRequirement::new(schedulr::ResourceId(1), 1),
+            ),
+            Activity::new(ActivityId(2), "German 10B", TimeWindow::new(0, 4), 1).with_requirement(
                 schedulr::ResourceRequirement::new(schedulr::ResourceId(1), 1),
             ),
         ],

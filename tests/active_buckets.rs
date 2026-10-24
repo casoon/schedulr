@@ -39,7 +39,7 @@ fn teacher_with(count: u64, duration: u64, days: Option<u64>) -> SchedulingProbl
         .collect();
     let mut problem = SchedulingProblem::new(
         vec![],
-        vec![Participant::new(teacher, "Teilzeit")],
+        vec![Participant::new(teacher, "part time")],
         activities,
     )
     .with_schedule_template(three_days());

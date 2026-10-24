@@ -1,17 +1,16 @@
-//! Gierige Konstruktion über **Aktivitäten** statt über Variablen (timbra plan/61).
+//! Greedy construction over **activities** instead of over variables (timbra plan/61).
 //!
-//! Die Konstruktion in `unifier` setzt Variable für Variable: erst einen Start, irgendwann
-//! später die Ressourcenwahl derselben Aktivität. Auf 580 Aktivitäten kam sie so nicht an einen
-//! gültigen Plan heran, während eine gierige Platzierung, die je Aktivität Start, Ressourcen und
-//! Teilnehmer **zusammen** entscheidet, in Millisekunden einen fand. Dieses Modul ist diese
-//! Platzierung, domänenfrei: sie kennt Aktivitäten, Teilnehmer, Ressourcen und die Relationen
-//! zwischen ihnen, nichts darüber hinaus.
+//! The construction in `unifier` assigns variable by variable: first a start, at some point later
+//! the resource choice of the same activity. On 580 activities it did not get near a feasible
+//! schedule that way, while a greedy placement that decides start, resources and participants
+//! **together** per activity found one in milliseconds. This module is that placement,
+//! domain-free: it knows activities, participants, resources and the relations between them,
+//! nothing beyond that.
 //!
-//! Das Ergebnis ist eine **Startbelegung**, kein Ergebnis. Sie muss nicht jede harte Regel
-//! einhalten — Mindestabstände, Tageslasten und Nicht-Überlappungs-Relationen kennt sie nicht,
-//! und was sich nicht legen ließ, liegt irgendwo. Die Reparatur in `unifier`
-//! (`LocalSearchSolver::repair_from`) setzt darauf auf, und erst das Ergebnis der Reparatur geht
-//! durch die übliche Prüfung.
+//! The result is a **starting assignment**, not a result. It need not satisfy every hard rule —
+//! it does not know minimum distances, daily loads and no-overlap relations, and whatever could
+//! not be placed lies somewhere. The repair in `unifier` (`LocalSearchSolver::repair_from`) builds
+//! on it, and only the result of the repair goes through the usual check.
 
 use crate::batch::{InternalCompiled, load_bucket_ranges};
 use crate::model::{
@@ -22,12 +21,12 @@ use std::time::Instant;
 use unifier::constraint::PropagationResult;
 use unifier::{BucketRange, PropagationEngine, TrailedDomains, VariableId};
 
-/// Wie oft höchstens neu angesetzt wird. Ein Anlauf, der scheitert, rückt die gescheiterte
-/// Einheit für den nächsten nach vorn — die Reihenfolge lernt, der Zufall streut.
+/// How many restarts at most. A failed attempt moves the unit that failed to the front for the
+/// next one — the order learns, the randomness spreads.
 const ATTEMPTS: u32 = 60;
 
-/// Oberhalb dieser Horizontlänge verzichtet die Konstruktion: ein Belegungsfeld je Träger wäre
-/// zu groß, und so feine Zeitraster sind nicht, wofür sie gebaut ist.
+/// Above this horizon length the construction gives up: one occupancy array per holder would be
+/// too large, and such fine time grids are not what it is built for.
 const MAX_HORIZON: i64 = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -36,24 +35,24 @@ enum Holder {
     Resource(ResourceId),
 }
 
-/// Aktivitäten, deren Starts fest aneinander hängen (gleicher Start, fester Versatz), werden als
-/// eine Einheit gelegt: `offset` ist der Abstand zum Start des Ankers.
+/// Activities whose starts are rigidly tied together (same start, fixed offset) are placed as
+/// one unit: `offset` is the distance to the anchor's start.
 struct Unit {
     members: Vec<(ActivityId, i64)>,
-    /// Die Ankerstarts, bei denen jedes Mitglied einen erlaubten Start bekommt.
+    /// The anchor starts at which every member gets an allowed start.
     starts: Vec<i64>,
 }
 
-/// Was die Platzierung für eine Aktivität beschlossen hat.
+/// What the placement decided for an activity.
 #[derive(Clone)]
 struct Placement {
     start: i64,
-    /// Je Anforderungsslot die gewählte Ressource.
+    /// The chosen resource per requirement slot.
     resources: Vec<ResourceId>,
     participant: Option<ParticipantId>,
 }
 
-/// Deterministischer Zufall, derselbe Generator wie in `unifier` — ein Seed, ein Ergebnis.
+/// Deterministic randomness, the same generator as in `unifier` — one seed, one result.
 struct Lcg(u64);
 
 impl Lcg {
@@ -73,7 +72,7 @@ impl Lcg {
     }
 }
 
-/// Belegung je Träger als Zähler je Zeiteinheit über den Horizont.
+/// Occupancy per holder as a counter per time unit across the horizon.
 struct Occupancy {
     origin: i64,
     length: usize,
@@ -115,9 +114,9 @@ impl Occupancy {
 }
 
 impl InternalCompiled {
-    /// Eine vollständige Startbelegung aller Start-, End- und Auswahlvariablen, die die
-    /// Aktivitäten möglichst konfliktfrei legt — oder `None`, wo die Konstruktion nicht greift
-    /// (leere Domäne nach der Propagation, zu langer Horizont, keine Aktivitäten).
+    /// A complete starting assignment of all start, end and selection variables that places the
+    /// activities with as few conflicts as possible — or `None` where the construction does not
+    /// apply (empty domain after propagation, horizon too long, no activities).
     pub(crate) fn greedy_start(
         &self,
         problem: &SchedulingProblem,
@@ -133,8 +132,8 @@ impl InternalCompiled {
             return None;
         }
 
-        // Erlaubte Starts je Aktivität: was die Propagation übrig ließ, also mitsamt
-        // Kalendersperren, Pausen und Tagesgrenzen.
+        // Allowed starts per activity: whatever propagation left, so including calendar
+        // closures, breaks and day boundaries.
         let mut allowed: BTreeMap<ActivityId, Vec<i64>> = BTreeMap::new();
         for (&activity, &(start, _)) in &self.variables {
             let values = domains.get(&start)?.values();
@@ -175,9 +174,9 @@ impl InternalCompiled {
             .enumerate()
             .flat_map(|(index, group)| group.activities.iter().map(move |&id| (id, index)))
             .collect();
-        // Zwei Blöcke derselben Gruppe, die sich berühren, lesen sich als ein längerer Block.
-        // Das zu vermeiden ist nur richtig, wo keine erlaubte Form einen Block verlangt, der
-        // länger ist als die Aktivitäten selbst — sonst ist genau das Zusammenwachsen verlangt.
+        // Two blocks of the same group that touch read as one longer block. Avoiding that is
+        // only right where no allowed shape requires a block longer than the activities
+        // themselves — otherwise exactly that merging is required.
         let pattern_group: HashMap<ActivityId, usize> = problem
             .bucket_load_patterns
             .iter()
@@ -199,7 +198,7 @@ impl InternalCompiled {
             })
             .flat_map(|(index, pattern)| pattern.activities.iter().map(move |&id| (id, index)))
             .collect();
-        // Je Aktivität die Start-Obergrenzen, zu denen sie zählt (Index, Grenze).
+        // Per activity the start upper bounds it counts towards (index, bound).
         let mut start_limits: HashMap<ActivityId, Vec<(usize, u64)>> = HashMap::new();
         for (index, rule) in problem.maximum_bucket_starts.iter().enumerate() {
             for &activity in &rule.activities {
@@ -209,7 +208,7 @@ impl InternalCompiled {
                     .push((index, rule.limit));
             }
         }
-        // Träger, die nur an wenigen Buckets aktiv sein dürfen.
+        // Holders that may only be active in a few buckets.
         let active_limits: HashMap<Holder, usize> = problem
             .maximum_active_buckets
             .iter()
@@ -217,7 +216,7 @@ impl InternalCompiled {
                 let holder = match rule.entity {
                     EntityRef::Participant(participant) => Holder::Participant(participant),
                     EntityRef::Resource(resource) => Holder::Resource(resource),
-                    // Eine Aktivität ist nie „an Tagen aktiv“ — die Regel spricht über Träger.
+                    // An activity is never "active on days" — the rule speaks about holders.
                     EntityRef::Activity(_) => return None,
                 };
                 Some((holder, usize::try_from(rule.limit).unwrap_or(usize::MAX)))
@@ -226,7 +225,7 @@ impl InternalCompiled {
         let activity_list: Vec<_> = self.activities.values().cloned().collect();
         let buckets = load_bucket_ranges(problem, &activity_list);
 
-        // Engste Einheit zuerst: wenig Startauswahl, viele Mitglieder, lange Dauer.
+        // Tightest unit first: little start choice, many members, long duration.
         let mut order: Vec<usize> = (0..units.len()).collect();
         let mut rng = Lcg(0x5eed_c0de);
         rng.mix(&mut order);
@@ -297,8 +296,8 @@ impl InternalCompiled {
                     None => {
                         failures += 1;
                         first_failure.get_or_insert(index);
-                        // Irgendwo hinlegen, aber nicht belegen: die Reparatur verschiebt es,
-                        // und die übrigen Einheiten werden davon nicht verdrängt.
+                        // Put it somewhere, but do not occupy: the repair moves it, and the
+                        // remaining units are not displaced by it.
                         let anchor = starts[0];
                         for &(activity, offset) in &unit.members {
                             let placement = self.fallback_placement(activity, anchor + offset);
@@ -323,8 +322,8 @@ impl InternalCompiled {
         Some(self.to_assignment(&placements))
     }
 
-    /// Verbindet Aktivitäten über `SameStart` und `FixedOffset` zu Einheiten mit festen Abständen.
-    /// Nur harte Relationen: eine gewünschte Gleichzeitigkeit darf die Suche auch aufgeben.
+    /// Joins activities via `SameStart` and `FixedOffset` into units with fixed offsets.
+    /// Hard relations only: the search may also give up a preferred simultaneity.
     fn units(
         &self,
         problem: &SchedulingProblem,
@@ -378,7 +377,7 @@ impl InternalCompiled {
                         .all(|(set, offset)| set.contains(&(anchor + offset)))
                 })
                 .collect::<Vec<_>>();
-            // Ohne gemeinsamen Start bleibt die Einheit trotzdem legbar — nur nicht konfliktfrei.
+            // Without a common start the unit can still be placed — just not conflict-free.
             let starts = if starts.is_empty() {
                 allowed[&root].clone()
             } else {
@@ -389,8 +388,8 @@ impl InternalCompiled {
         units
     }
 
-    /// Die festen Träger einer Aktivität: Teilnehmer (auch aus aufgelösten Gruppen), fest
-    /// verlangte Teilnehmer und fest verlangte Ressourcen.
+    /// The fixed holders of an activity: participants (including those from resolved groups),
+    /// required participants and required resources.
     fn fixed_holders(&self, activity: ActivityId) -> Vec<Holder> {
         let mut holders: Vec<Holder> = self.activities[&activity]
             .participants()
@@ -432,7 +431,7 @@ impl InternalCompiled {
             active_limits,
             buckets,
         } = *rules;
-        // Ob ein Träger in diesem Bucket noch aktiv werden darf: schon aktiv, oder noch Platz.
+        // Whether a holder may still become active in this bucket: already active, or room left.
         let mut opened: HashMap<Holder, Vec<usize>> = HashMap::new();
         let may_be_active =
             |opened: &HashMap<Holder, Vec<usize>>, holder: Holder, bucket: usize| {
@@ -447,9 +446,9 @@ impl InternalCompiled {
                 }
                 used.map_or(0, BTreeSet::len) + opened.get(&holder).map_or(0, Vec::len) < limit
             };
-        // Starts, die diese Einheit selbst schon je (Regel, Bucket) beansprucht.
+        // Starts this unit itself already claims per (rule, bucket).
         let mut own_starts: HashMap<(usize, usize), u64> = HashMap::new();
-        // Was diese Einheit selbst schon belegt: zwei Mitglieder dürfen sich keinen Träger teilen.
+        // What this unit itself already occupies: two members may not share a holder.
         let mut own: Vec<(Holder, i64, i64)> = Vec::new();
         let taken_by_unit = |own: &[(Holder, i64, i64)], holder: Holder, start: i64, end: i64| {
             own.iter()
@@ -610,7 +609,7 @@ impl InternalCompiled {
         }
     }
 
-    /// Eine Platzierung ohne Rücksicht auf Konflikte: erster Kandidat je Slot.
+    /// A placement without regard to conflicts: first candidate per slot.
     fn fallback_placement(&self, activity: ActivityId, start: i64) -> Placement {
         Placement {
             start,
@@ -628,8 +627,8 @@ impl InternalCompiled {
         }
     }
 
-    /// Übersetzt die Platzierungen in Werte für Start-, End- und Auswahlvariablen. Was hier
-    /// fehlt, setzt `repair_from` selbst.
+    /// Translates the placements into values for start, end and selection variables. Whatever
+    /// is missing here, `repair_from` sets itself.
     fn to_assignment(
         &self,
         placements: &BTreeMap<ActivityId, Placement>,
@@ -668,25 +667,25 @@ impl InternalCompiled {
     }
 }
 
-/// Der Zustand eines Anlaufs.
+/// The state of one attempt.
 struct Attempt {
     occupancy: Occupancy,
-    /// Je (Blockform-Gruppe, Bucket) die gelegten Blöcke — zwei Blöcke derselben Gruppe dürfen
-    /// sich in einem Bucket nicht berühren, sonst läsen sie sich als ein längerer Block.
+    /// Per (block-shape group, bucket) the placed blocks — two blocks of the same group may not
+    /// touch within a bucket, otherwise they would read as one longer block.
     pattern_blocks: HashMap<(usize, usize), Vec<(i64, i64)>>,
-    /// Je (Start-Obergrenze, Bucket), wie viele Aktivitäten dort schon beginnen.
+    /// Per (start upper bound, bucket), how many activities already start there.
     starts: HashMap<(usize, usize), u64>,
-    /// Je Träger mit Bucket-Grenze die Buckets, in denen er schon aktiv ist.
+    /// Per holder with a bucket limit, the buckets in which it is already active.
     active: HashMap<Holder, BTreeSet<usize>>,
-    /// Je Auswahlgruppe der gewählte Teilnehmer.
+    /// The chosen participant per choice group.
     chosen: HashMap<usize, ParticipantId>,
-    /// Belegte Zeit je wählbarem Teilnehmer, damit die Wahl sich verteilt.
+    /// Occupied time per selectable participant, so that the choice spreads out.
     load: HashMap<ParticipantId, i64>,
     placements: BTreeMap<ActivityId, Placement>,
 }
 
-/// Die Regeln, die ein Anlauf beim Legen beachtet — gebündelt, weil jede Platzierung sie alle
-/// braucht.
+/// The rules an attempt observes while placing — bundled, because every placement needs all of
+/// them.
 #[derive(Clone, Copy)]
 struct Rules<'a> {
     capacities: &'a HashMap<ResourceId, u16>,

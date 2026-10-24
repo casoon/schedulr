@@ -217,7 +217,7 @@ fn break_template_blocks_activities_that_would_overlap_it() {
             .with_slot(SlotTemplate::new("first", 0, 1))
             .with_slot(SlotTemplate::new("second", 2, 1))
             .with_break(BreakTemplate {
-                name: "Pause".to_string(),
+                name: "Break".to_string(),
                 window: TimeWindow::new(0, 2),
             }),
     );
@@ -237,7 +237,7 @@ fn break_template_blocks_activities_that_would_overlap_it() {
 fn resource_unavailable_range_blocks_the_early_slot() {
     // AllowedTime via a fixed (exact) resource requirement: the gym is unavailable
     // 0..=3, so the earliest usable start is 4, not the naive earliest, 0.
-    let gym = Resource::new(ResourceId(1), "Sporthalle", 1).with_unavailable_range(0, 3);
+    let gym = Resource::new(ResourceId(1), "Gym", 1).with_unavailable_range(0, 3);
     let activity = Activity::new(ActivityId(1), "Sport", TimeWindow::new(0, 10), 1)
         .with_requirement(ResourceRequirement::new(ResourceId(1), 1));
     let problem = SchedulingProblem::new(vec![gym], vec![], vec![activity]);
@@ -253,7 +253,7 @@ fn participant_availability_makes_the_solver_pick_the_other_candidate() {
     // proving the calendar restriction is applied per-candidate, not globally.
     let unavailable = Participant::new(ParticipantId(1), "Krüger").with_unavailable_range(0, 0);
     let available = Participant::new(ParticipantId(2), "Bauer");
-    let activity = Activity::new(ActivityId(1), "Mathe", TimeWindow::new(0, 1), 1)
+    let activity = Activity::new(ActivityId(1), "Maths", TimeWindow::new(0, 1), 1)
         .with_participant_requirement(
             ParticipantRequirement::matching()
                 .with_candidate(ParticipantId(1))

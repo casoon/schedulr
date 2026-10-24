@@ -1,14 +1,14 @@
-//! Regeln über die Belegung eines Trägers **je Bucket** — die Tagesregeln aus timbra Plan 69,
-//! Paket A: Mindestlast, Verweildauer, Pause zwischen zwei Buckets, ein freier Lauf in einem
-//! Fenster, Belegung bestimmter Bucket-Abschnitte, verschiedene Gruppen je Bucket — und drei Ziele
-//! (Einzelblock je Teilfenster, gemeinsame Anwesenheit, gleichzeitig Freie).
+//! Rules about a holder's occupancy **per bucket** — the daily rules from timbra plan 69,
+//! package A: minimum load, maximum span, a break between two buckets, a free run inside a
+//! window, occupancy of specific bucket sections, distinct groups per bucket — and three
+//! objectives (single block per sub-window, shared presence, simultaneously free).
 //!
-//! Alle rechnen auf den konkreten Bucket-Fenstern (`BucketRange`), nicht auf dem Bucket-Index:
-//! Montag der Woche A und Montag der Woche B sind zwei Tage. Ein Bucket zählt als **aktiv**, wenn
-//! der Träger darin etwas belegt; die meisten Regeln fragen nur aktive Buckets.
+//! All of them work on the concrete bucket windows (`BucketRange`), not on the bucket index:
+//! Monday of week A and Monday of week B are two days. A bucket counts as **active** if the
+//! holder occupies something in it; most rules only look at active buckets.
 //!
-//! Was nicht monoton ist (die Mindestlast: mehr Belegtes kann sie erst erfüllen), urteilt erst,
-//! wenn jede Aufgabe entschieden ist — sonst würde eine Teilbelegung gesunde Lösungen abschneiden.
+//! Rules that are not monotone (the minimum load: only more occupancy can satisfy it) judge only
+//! once every task is decided — otherwise a partial assignment would cut off sound solutions.
 
 use crate::model::ResourceId;
 use std::collections::{BTreeSet, HashMap};
@@ -17,11 +17,11 @@ use unifier::constraint::{BucketRange, BucketedTask, Constraint, PropagationResu
 use unifier::model::domain::{Domain, TrailedDomains};
 use unifier::score::Objective;
 
-/// Die belegten Abschnitte eines Trägers, je Bucket-Fenster zu Blöcken verschmolzen.
+/// A holder's occupied sections, merged into blocks per bucket window.
 #[derive(Debug, Clone)]
 pub(crate) struct Track {
     tasks: Vec<BucketedTask>,
-    /// Nach Beginn sortiert.
+    /// Sorted by start.
     ranges: Vec<BucketRange>,
     scope: Vec<VariableId>,
 }
@@ -47,13 +47,13 @@ impl Track {
             .is_none_or(|presence| assignment.get(&presence) == Some(&1))
     }
 
-    /// Ob jede Aufgabe entschieden ist: Start und, falls vorhanden, Anwesenheit.
+    /// Whether every task is decided: start and, if present, presence.
     fn decided(&self, assignment: &HashMap<VariableId, i64>) -> bool {
         self.scope.iter().all(|var| assignment.contains_key(var))
     }
 
-    /// Je Bucket-Fenster die belegten Blöcke `[start, end)`, sortiert und verschmolzen; was ein
-    /// Fenster überragt, wird an seinem Rand abgeschnitten.
+    /// Per bucket window the occupied blocks `[start, end)`, sorted and merged; whatever extends
+    /// beyond a window is cut off at its edge.
     fn blocks(&self, assignment: &HashMap<VariableId, i64>) -> Vec<Vec<(i64, i64)>> {
         let mut per_range: Vec<Vec<(i64, i64)>> = vec![Vec::new(); self.ranges.len()];
         for task in &self.tasks {
@@ -91,7 +91,7 @@ fn occupied(blocks: &[(i64, i64)]) -> i64 {
     blocks.iter().map(|(start, end)| end - start).sum()
 }
 
-/// Belegte Einheiten von `blocks` im Fenster `[from, to)`.
+/// Occupied units of `blocks` within the window `[from, to)`.
 fn occupied_within(blocks: &[(i64, i64)], from: i64, to: i64) -> i64 {
     blocks
         .iter()
@@ -103,26 +103,26 @@ fn to_u32(value: i64) -> u32 {
     u32::try_from(value.max(0)).unwrap_or(u32::MAX)
 }
 
-/// Die einzelnen Regeln. Jede ist eine Bedingung über einer [`Track`]; `violations` zählt die
-/// fehlenden oder überzähligen Einheiten, damit eine Suche die Richtung sieht.
+/// The individual rules. Each is a constraint over a [`Track`]; `violations` counts the missing
+/// or excess units so that a search sees the direction.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BucketRuleKind {
-    /// In jedem aktiven Bucket mindestens `limit` belegte Einheiten.
+    /// In every active bucket at least `limit` occupied units.
     MinimumLoad { limit: i64 },
-    /// In jedem Bucket höchstens `limit` Einheiten vom ersten Beginn bis zum letzten Ende.
+    /// In every bucket at most `limit` units from the first start to the last end.
     MaximumSpan { limit: i64 },
-    /// Zwischen zwei aufeinanderfolgenden aktiven Buckets mindestens `limit` freie Einheiten:
-    /// vom letzten Ende bis zum Fensterende plus vom Fensterbeginn bis zum ersten Beginn.
+    /// Between two consecutive active buckets at least `limit` free units: from the last end to
+    /// the end of the window plus from the start of the window to the first start.
     MinimumGapBetween { limit: i64 },
-    /// In jedem aktiven Bucket ein freier Lauf von mindestens `min_run` Einheiten im Abschnitt
-    /// `[start_offset, end_offset)` des Fensters.
+    /// In every active bucket a free run of at least `min_run` units within the section
+    /// `[start_offset, end_offset)` of the window.
     FreeRunWithin {
         start_offset: i64,
         end_offset: i64,
         min_run: i64,
     },
-    /// Über alle Buckets höchstens `limit` belegte Einheiten im Abschnitt
-    /// `[start_offset, end_offset)` jedes Fensters.
+    /// Across all buckets at most `limit` occupied units within the section
+    /// `[start_offset, end_offset)` of each window.
     MaximumAtOffsets {
         start_offset: i64,
         end_offset: i64,
@@ -242,18 +242,18 @@ impl Constraint for BucketRule {
         to_u32(self.count(assignment))
     }
 
-    /// Keine Domänenfilterung: ob ein Tag zu kurz oder zu lang wird, entscheidet sich erst mit
-    /// mehreren Aufgaben. Hart bleibt die Regel über `is_satisfied`.
+    /// No domain filtering: whether a day becomes too short or too long only settles with
+    /// several tasks. The rule stays hard through `is_satisfied`.
     fn propagate(&self, _domains: &mut TrailedDomains) -> PropagationResult {
         PropagationResult::Success { changed: false }
     }
 }
 
-/// Höchstens `limit` verschiedene Gruppen je Bucket — „höchstens fünf verschiedene Fächer am Tag“.
-/// Eine Aufgabe gehört zum Bucket, in dem sie beginnt.
+/// At most `limit` distinct groups per bucket — "at most five different subjects per day".
+/// A task belongs to the bucket in which it starts.
 #[derive(Debug, Clone)]
 pub(crate) struct DistinctPerBucket {
-    /// `(Aufgabe, Gruppenschlüssel)`.
+    /// `(task, group key)`.
     tasks: Vec<(BucketedTask, usize)>,
     ranges: Vec<BucketRange>,
     limit: usize,
@@ -335,9 +335,9 @@ fn bound(weight: i64) -> i64 {
     if weight < 0 { i64::MAX } else { 0 }
 }
 
-/// Ein einzelner belegter Block allein in einer Hälfte eines aktiven Buckets kostet — „nicht für
-/// eine einzige Stunde am Nachmittag kommen“. Die Hälften trennt `split_offset`; allein heißt:
-/// in dieser Hälfte genau `max_units` oder weniger belegte Einheiten, aber mehr als keine.
+/// A single occupied block alone in one half of an active bucket costs — "do not come in for a
+/// single hour in the afternoon". `split_offset` separates the halves; alone means: in that half
+/// exactly `max_units` or fewer occupied units, but more than none.
 #[derive(Debug)]
 pub(crate) struct IsolatedBlockObjective {
     track: Track,
@@ -386,15 +386,15 @@ impl Objective for IsolatedBlockObjective {
     }
 }
 
-/// Eine Aufgabe zweier Träger zugleich: anwesend, wenn beide es sind.
+/// A task shared by two holders: present if both are.
 #[derive(Debug, Clone)]
 pub(crate) struct JointTask {
     pub(crate) start: VariableId,
     pub(crate) presences: Vec<VariableId>,
 }
 
-/// In jedem Bucket, in dem der Anker aktiv ist, mindestens eine gemeinsame Aufgabe mit dem
-/// Begleiter — „der Klassenlehrer sieht seine Klasse jeden Tag“.
+/// In every bucket in which the anchor is active, at least one shared task with the
+/// companion — "the form teacher sees their class every day".
 #[derive(Debug)]
 pub(crate) struct JointPresenceObjective {
     anchor: Track,
@@ -466,9 +466,9 @@ impl Objective for JointPresenceObjective {
     }
 }
 
-/// Höchstens `limit` Träger zugleich frei im Abschnitt `[start_offset, end_offset)` ihrer aktiven
-/// Buckets — „nicht alle Klassen gleichzeitig in der Mittagspause“. Jede Einheit, in der mehr als
-/// `limit` frei sind, kostet je Überzähligem.
+/// At most `limit` holders free at the same time within the section `[start_offset, end_offset)`
+/// of their active buckets — "not all classes on lunch break at once". Every unit in which more
+/// than `limit` are free costs per excess holder.
 #[derive(Debug)]
 pub(crate) struct ConcurrentFreeObjective {
     tracks: Vec<Track>,
@@ -514,7 +514,7 @@ impl Objective for ConcurrentFreeObjective {
     }
 
     fn evaluate(&self, assignment: &HashMap<VariableId, i64>) -> i64 {
-        // Alle Träger teilen dieselben Bucket-Fenster; gezählt wird je Einheit des Abschnitts.
+        // All holders share the same bucket windows; counting is per unit of the section.
         let mut free: HashMap<i64, i64> = HashMap::new();
         for track in &self.tracks {
             let blocks = track.blocks(assignment);
@@ -540,42 +540,42 @@ impl Objective for ConcurrentFreeObjective {
     }
 }
 
-/// Die Arten von [`ActivityGoalObjective`] — Verteilungsziele über einer Menge von Aufgaben
-/// (timbra Plan 69, Paket B). Offsets zählen ab dem Beginn des jeweiligen Bucket-Fensters.
+/// The kinds of [`ActivityGoalObjective`] — distribution objectives over a set of tasks
+/// (timbra plan 69, package B). Offsets count from the start of the respective bucket window.
 #[derive(Debug, Clone)]
 pub(crate) enum ActivityGoalShape {
-    /// Jedes Paar aufeinanderfolgender Bucket-Fenster, in denen beide etwas beginnt, kostet.
+    /// Every pair of consecutive bucket windows in which both start something costs.
     NotOnAdjacentBuckets,
-    /// Jeder weitere Beginn auf einem schon belegten Offset kostet.
+    /// Every further start on an already occupied offset costs.
     OffsetVariety,
-    /// Jeder weitere verschiedene Offset über den ersten hinaus kostet.
+    /// Every further distinct offset beyond the first costs.
     OffsetStability,
-    /// Die Zahl der Beginne in `[start_offset, end_offset)` liegt in `[min, max]`; jeder darunter
-    /// oder darüber kostet.
+    /// The number of starts in `[start_offset, end_offset)` lies in `[min, max]`; each one below
+    /// or above costs.
     StartsWithinOffsets {
         start_offset: i64,
         end_offset: i64,
         min: i64,
         max: i64,
     },
-    /// Paare aus **verschiedenen** Gruppen (`group` je Aufgabe) im selben Bucket.
+    /// Pairs from **different** groups (`group` per task) in the same bucket.
     Proximity { mode: Proximity },
-    /// Jeder zusammenhängende Block von mindestens `min_length` Einheiten, der weder an einem der
-    /// `edges`-Offsets beginnt noch endet, kostet.
+    /// Every contiguous block of at least `min_length` units that neither starts nor ends at one
+    /// of the `edges` offsets costs.
     BlockAtEdges { min_length: i64, edges: Vec<i64> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Proximity {
-    /// Direkt hintereinander kostet.
+    /// Directly back to back costs.
     AvoidAdjacent,
-    /// Am selben Tag kostet.
+    /// On the same day costs.
     AvoidSameBucket,
-    /// Am selben Tag, aber nicht direkt hintereinander, kostet.
+    /// On the same day, but not directly back to back, costs.
     PreferAdjacent,
 }
 
-/// Eine Aufgabe eines Verteilungsziels: Beginn, Dauer und die Gruppe, zu der sie gehört.
+/// A task of a distribution objective: start, duration and the group it belongs to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GoalTask {
     pub(crate) start: VariableId,
@@ -612,7 +612,7 @@ impl ActivityGoalObjective {
         }
     }
 
-    /// Je zugewiesener Aufgabe: Bucket-Index (in `ranges`), Offset, Ende, Gruppe.
+    /// Per assigned task: bucket index (in `ranges`), offset, end, group.
     fn placed(&self, assignment: &HashMap<VariableId, i64>) -> Vec<(usize, i64, i64, usize)> {
         self.tasks
             .iter()
@@ -726,7 +726,7 @@ impl Objective for ActivityGoalObjective {
     }
 }
 
-/// Die Raumwahl einer Aufgabe: feste Räume (`None`) und Kandidaten mit Auswahlvariable.
+/// The room choice of a task: fixed rooms (`None`) and candidates with a selection variable.
 pub(crate) type RoomOptions = Vec<(ResourceId, Option<VariableId>)>;
 
 fn chosen(options: &RoomOptions, assignment: &HashMap<VariableId, i64>) -> Vec<ResourceId> {
@@ -739,8 +739,8 @@ fn chosen(options: &RoomOptions, assignment: &HashMap<VariableId, i64>) -> Vec<R
         .collect()
 }
 
-/// Was die Wahl eines Raums kostet (timbra Plan 69, Paket C): je Aufgabe die Kosten der
-/// gewählten Räume, ein nicht genannter Raum kostet `default_cost`.
+/// What choosing a room costs (timbra plan 69, package C): per task the cost of the chosen
+/// rooms; a room not listed costs `default_cost`.
 #[derive(Debug)]
 pub(crate) struct ResourceCostObjective {
     tasks: Vec<RoomOptions>,
@@ -807,20 +807,20 @@ impl Objective for ResourceCostObjective {
     }
 }
 
-/// Eine Aufgabe eines Trägers mit ihrer Raumwahl.
+/// A task of a holder with its room choice.
 #[derive(Debug, Clone)]
 pub(crate) struct RoomTask {
     pub(crate) start: VariableId,
     pub(crate) duration: i64,
-    /// Ob der Träger diese Aufgabe überhaupt hat (Kandidatenpool); `None` = sicher.
+    /// Whether the holder has this task at all (candidate pool); `None` = certain.
     pub(crate) presence: Option<VariableId>,
     pub(crate) rooms: RoomOptions,
 }
 
-/// Raumwechsel und Wegezeiten eines Trägers (timbra Plan 69, Paket C): in jedem Bucket je zwei
-/// aufeinanderfolgende Aufgaben in verschiedenen Räumen kosten `change_weight`; liegen die Räume
-/// an verschiedenen Orten und ist dazwischen weniger als `travel_gap` frei, kostet das
-/// zusätzlich `travel_weight`.
+/// Room changes and travel times of a holder (timbra plan 69, package C): in every bucket, each
+/// two consecutive tasks in different rooms cost `change_weight`; if the rooms are at different
+/// locations and less than `travel_gap` is free in between, that additionally costs
+/// `travel_weight`.
 #[derive(Debug)]
 pub(crate) struct RoomChangeObjective {
     tasks: Vec<RoomTask>,
@@ -947,7 +947,7 @@ mod tests {
 
     #[test]
     fn minimum_load_counts_only_active_days() {
-        // Tag 0: zwei Einheiten, Tag 1: keine — nur Tag 0 zählt, ihm fehlt eine.
+        // Day 0: two units, day 1: none — only day 0 counts, and it is one short.
         assert_eq!(
             count(BucketRuleKind::MinimumLoad { limit: 3 }, &[(0, 0), (1, 1)]),
             1
@@ -956,7 +956,7 @@ mod tests {
 
     #[test]
     fn span_measures_first_start_to_last_end() {
-        // 0 bis 5: Spanne 5, erlaubt 3.
+        // 0 to 5: span 5, 3 allowed.
         assert_eq!(
             count(BucketRuleKind::MaximumSpan { limit: 3 }, &[(0, 0), (1, 4)]),
             2
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn gap_between_days_adds_evening_and_morning() {
-        // Abends bis 6 belegt (Ende 6), morgens ab 6: keine Pause; verlangt 2.
+        // Occupied until 6 in the evening (end 6), from 6 in the morning: no break; 2 required.
         assert_eq!(
             count(
                 BucketRuleKind::MinimumGapBetween { limit: 2 },
@@ -973,7 +973,7 @@ mod tests {
             ),
             2
         );
-        // Abends Ende 4 (2 frei), morgens ab 7 (1 frei): genug.
+        // Evening end 4 (2 free), morning from 7 (1 free): enough.
         assert_eq!(
             count(
                 BucketRuleKind::MinimumGapBetween { limit: 2 },
@@ -990,9 +990,9 @@ mod tests {
             end_offset: 5,
             min_run: 2,
         };
-        // Belegt 2 und 4: im Fenster [2, 5) bleibt nur die 3 frei — eine Einheit zu wenig.
+        // Occupied 2 and 4: in the window [2, 5) only 3 stays free — one unit short.
         assert_eq!(count(lunch, &[(0, 2), (1, 4)]), 1);
-        // Belegt 0 und 5: das Fenster ist ganz frei.
+        // Occupied 0 and 5: the window is entirely free.
         assert_eq!(count(lunch, &[(0, 0), (1, 5)]), 0);
     }
 

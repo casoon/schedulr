@@ -30,7 +30,7 @@ fn lesson(id: u64, start: i64, end: i64) -> Activity {
 fn solve(activities: Vec<Activity>, kind: ActivityGoalKind) -> Solution {
     let problem = SchedulingProblem::new(vec![], vec![], activities)
         .with_schedule_template(three_days())
-        .with_activity_goal(ActivityGoal::new("Ziel", ScoreLevel::Medium, 1, kind));
+        .with_activity_goal(ActivityGoal::new("goal", ScoreLevel::Medium, 1, kind));
     compile(&problem)
         .expect("compiles")
         .solve()

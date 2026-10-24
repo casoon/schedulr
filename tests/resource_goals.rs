@@ -56,7 +56,7 @@ fn the_cheaper_room_wins() {
     let solution = solve(
         SchedulingProblem::new(rooms(), vec![], vec![lesson]).with_resource_cost_goal(
             ResourceCostGoal {
-                category: "Rangfolge".to_string(),
+                category: "ranking".to_string(),
                 level: ScoreLevel::Medium,
                 weight: 1,
                 activities: vec![ActivityId(1)],
@@ -83,7 +83,7 @@ fn a_room_change_is_avoided() {
         SchedulingProblem::new(rooms(), vec![Participant::new(P, "P")], vec![first, second])
             .with_schedule_template(one_day())
             .with_room_change_goal(RoomChangeGoal {
-                category: "Raumwechsel".to_string(),
+                category: "room changes".to_string(),
                 level: ScoreLevel::Medium,
                 entity: EntityRef::Participant(P),
                 locations: vec![(A, 0), (B, 1)],

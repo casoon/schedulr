@@ -12,7 +12,7 @@ fn problem(windows: Vec<(TimeWindow, i64)>) -> SchedulingProblem {
         Activity::new(ActivityId(1), "l", TimeWindow::new(0, 4), 1).with_participant(person.id());
     SchedulingProblem::new(vec![], vec![person], vec![lesson]).with_time_preference(
         TimePreference::new(
-            "Zeitwunsch",
+            "time preference",
             ScoreLevel::Medium,
             EntityRef::Participant(ParticipantId(1)),
             windows,
@@ -58,7 +58,7 @@ fn an_activity_can_carry_its_own_preference() {
     let lesson = Activity::new(ActivityId(1), "l", TimeWindow::new(0, 4), 1);
     let problem = SchedulingProblem::new(vec![], vec![], vec![lesson]).with_time_preference(
         TimePreference::new(
-            "Kurswunsch",
+            "course preference",
             ScoreLevel::Medium,
             EntityRef::Activity(ActivityId(1)),
             vec![(TimeWindow::new(1, 2), 3)],

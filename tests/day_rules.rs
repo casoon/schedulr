@@ -90,7 +90,7 @@ fn span_is_hard_or_charged() {
         SolveStatus::Infeasible
     );
     let soft =
-        base().with_day_rule(rule.soft(SoftPenalty::new("Verweildauer", ScoreLevel::Weak, 3)));
+        base().with_day_rule(rule.soft(SoftPenalty::new("time on site", ScoreLevel::Weak, 3)));
     let solution = solve(&soft).1.expect("a preference never blocks");
     assert_eq!(solution.score.weak, -6);
 }
@@ -137,7 +137,7 @@ fn a_lone_half_day_costs() {
         lesson(3, 0, 6, &[P]),
     ])
     .with_isolated_block_goal(IsolatedBlockGoal {
-        category: "Einzelstunde".to_string(),
+        category: "single period".to_string(),
         level: ScoreLevel::Medium,
         weight: 1,
         entity: EntityRef::Participant(P),
@@ -163,7 +163,7 @@ fn the_companion_is_met_every_active_day() {
         lesson(4, 0, 12, &[P, Q]),
     ])
     .with_joint_presence_goal(JointPresenceGoal {
-        category: "Klassenlehrer".to_string(),
+        category: "class teacher".to_string(),
         level: ScoreLevel::Medium,
         weight: 1,
         anchor: EntityRef::Participant(P),
@@ -183,7 +183,7 @@ fn not_everyone_is_free_at_once() {
         lesson(4, 4, 5, &[Q]),
     ])
     .with_concurrent_free_goal(ConcurrentFreeGoal {
-        category: "Mittag".to_string(),
+        category: "lunch".to_string(),
         level: ScoreLevel::Medium,
         weight: 1,
         entities: vec![EntityRef::Participant(P), EntityRef::Participant(Q)],
