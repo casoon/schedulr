@@ -39,6 +39,13 @@ let problem = SchedulingProblem::new(resources, participants, activities)
 | `Equal` | A `SameStart` or `Consecutive` relation is violated |
 | `PeriodicValues` | A start lies outside the slot calendar or on an exception |
 | `ForbiddenValues` | A start lies in an unavailable range of a resource or participant |
+| `ParticipantChoiceGroup` | A participant choice group gets a selection it does not allow |
+| `MaximumBucketLoad` | A `MaximumDailyLoad` or `MaximumBucketStarts` limit is exceeded |
+| `BucketBlockPattern` | A bucket's occupancy does not match its `BucketLoadPattern` |
+| `MaximumActiveBuckets` | An entity is active in more buckets than `MaximumActiveBuckets` allows |
+| `MinimumDistance`, `MinimumBreak` | Two activities are closer than a `MinimumBreak` requires |
+| `MinimumDailyLoad`, `MaximumDailySpan`, `MinimumGapBetweenBuckets`, `FreeRunWithin`, `MaximumOccupancyAtOffsets` | A `DayRule` of the matching `DayRuleKind` is violated |
+| `MaximumDistinctPerBucket` | More distinct groups start in one bucket than the limit allows |
 | `Model` | `SchedulingState` received invalid input, for example an unknown activity to exclude |
 | `ActivityDomain` | `evaluate_move` got an unknown activity or a window outside the activity's domain, or `check` got an assignment for an activity the problem does not contain |
 | `Unassigned` | `check` found a modeled activity without an assignment in the solution |

@@ -39,8 +39,10 @@ How it works:
 - The allowed starts repeat every `cycle_length` units across the academic period. Every activity
   window must lie inside the academic period, otherwise `compile` reports "lies outside the
   academic period".
-- `with_unavailable_range(start, end)` removes absolute start times, inclusive on both ends:
-  holidays, closures, one-off events.
+- `with_unavailable_range(start, end)` closes an absolute range, inclusive on both ends:
+  holidays, closures, one-off events. No activity may occupy it, so an activity that would run
+  into the range from an earlier start is refused as well. The range does not repeat with the
+  cycle.
 
 An empty template (no slot at all) or a cycle length of zero or less is a compile error.
 
@@ -98,7 +100,7 @@ let ben = Participant::new(ParticipantId(2), "Ben").with_blocked_window(TimeWind
 No activity may *occupy* any part of a blocked window. Blocking the single hour `[3, 4)` therefore
 forbids a one-hour lesson at 3, and a two-hour lesson at 2 as well, because that one would run
 through the block. `TimeWindow::blocked_starts(duration)` returns exactly the starts that are
-ruled out (as an inclusive range, the shape `add_calendar` takes) and
+ruled out (as an inclusive range) and
 `TimeWindow::occupies(start, duration)` answers the same question for one start.
 
 For fixed requirements a blocked window always applies; for flexible ones only to the selected

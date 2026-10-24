@@ -36,6 +36,7 @@ schedulr depends on `unifier` and nothing else: the 0.14.0 release on unifier 0.
 | unavailable ranges | `ForbiddenValues` on the start, optional per candidate |
 | `SameStart`, `Consecutive` | `Equal` on start/start or end/start |
 | `Precedence { min_gap }` | `Precedence` |
+| `FixedOffset { offset }` | `Equal` on the two starts, shifted by `offset` |
 | `NoOverlap` relation | `NoOverlap` over the two intervals |
 | `ScoreRule` | a scored objective on its level |
 
@@ -46,15 +47,20 @@ individual participants.
 
 schedulr picks the solver per call:
 
-- `solve()` without score rules: unifier's `BacktrackingSolver`.
-- `solve()` with score rules: unifier's `BranchAndBoundSolver`.
+- `solve()` without score rules or goals: a construction phase only — a short run of unifier's
+  `BacktrackingSolver`; if that finds nothing, a greedy placement that unifier's
+  `LocalSearchSolver` repairs until the hard constraints hold.
+- `solve()` with score rules or goals: the same construction, then, by default, unifier's
+  `ParallelSolver` for the rest of the budget (`SolveStrategy::ConstructThenOptimize` uses
+  `BranchAndBoundSolver` instead).
 - `repair()`: unifier's `LnsSolver`, started from the baseline.
 - `SchedulingState` and `evaluate_move`: no solver, only unifier's incremental check of the
   constraints adjacent to the changed variables.
 
 ## What stays hidden
 
-No unifier type appears in schedulr's public API. Variables, constraint ids and unifier's
+Apart from `CancellationToken`, which schedulr re-exports from unifier, no unifier type appears
+in schedulr's public API. Variables, constraint ids and unifier's
 violation structs are mapped back to `ActivityId`, `ResourceId`, `ParticipantId` and the names
 you gave, so a `Conflict` can be shown to users directly. If you need constraints schedulr does
 not model, work with unifier directly; the [unifier documentation](https://casoon.github.io/unifier/)

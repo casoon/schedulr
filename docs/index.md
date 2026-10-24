@@ -24,32 +24,14 @@ pathwise → unifier → schedulr → (application: timetabling, appointment boo
 - Explanations and follow-up work: `explain`, `analyze`, `evaluate_move`, `suggest`, `compare` and
   a baseline-aware `repair`.
 
-## Versions
+## How a run works
 
-The latest release on crates.io is **0.11.0**, and master carries nothing beyond it.
-
-0.11.0 adds `SolveResult::best_effort`: how far a run got when it could not return a schedule —
-a complete assignment that breaks hard constraints, deliberately kept out of `solution` so no
-caller can mistake it for one. Hand it to `CompiledProblem::check` for the reasons, in the same
-`Conflict` vocabulary as every other explanation here. Breaking only because the struct gained a
-public field.
-
-Two paths used to drop that information on the floor: a run whose assignment the hard-constraint
-gate rejected kept nothing, and the two-phase search fell back to its construction phase and
-discarded whatever the optimizer had reached. Both now carry it through.
-
-0.10.0 moves to unifier 0.5 and is breaking only through it: `CancellationToken` is a unifier
-type re-exported here, and the hard score is now a count of *violations* rather than of violated
-constraints, so its magnitudes differ from 0.9.0's for the same schedule. Feasibility is
-unchanged — a hard score of zero still means every hard constraint holds. What the release is
-worth lies in unifier: a search now reports the best complete assignment it reached even when it
-could not vouch for it, and the construction that feeds it undoes conflicts instead of building
-on them.
-
-0.9.0 added what 0.8.0 lacked: breaks, per participant and per resource availability, activity
-relations, baseline-aware repair, participant choice groups and `CompiledProblem::check`. A run
-also constructs a feasible schedule before optimizing it, chooses how to spend its budget (see
-`SolveStrategy`), and never returns a schedule that violates hard constraints.
+`solve()` first constructs a schedule that satisfies every hard constraint, then spends the rest
+of its budget improving it; `SolveOptions` sets the time limit, a cancellation token and the
+`SolveStrategy`. A schedule that violates hard constraints is never returned as a solution: when
+a run gets no further than that, the assignment it reached is kept in `SolveResult::best_effort`,
+and `CompiledProblem::check` gives the reasons in the same `Conflict` vocabulary as every other
+explanation here. See [Analysis and repair](guides/analysis-and-repair/#solving).
 
 ## Where it stops
 
@@ -57,8 +39,8 @@ also constructs a feasible schedule before optimizing it, chooses how to spend i
 - There is no file format, serialization or CLI; problems are built in Rust.
 - Persistence is an application concern. Solutions carry their score components so they can be
   stored with each schedule version.
-- The solver is an exact search with a time limit. It is not yet tested on production-scale
-  instances, so evaluate it on your own data before relying on it.
+- The search runs within a time limit and proves optimality only when it can. It is not yet
+  tested on production-scale instances, so evaluate it on your own data before relying on it.
 
 ## How the docs are organised
 

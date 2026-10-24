@@ -829,7 +829,7 @@ impl ScheduleTemplate {
     /// reaches into the range is refused as well, whatever its length. That is what a calendar
     /// closure means — the slots are gone for everyone, not just as starting points.
     ///
-    /// The range repeats every [`Self::cycle_length`], like the rest of the template.
+    /// The range is absolute: unlike the slots, it does not repeat every [`Self::cycle_length`].
     pub fn with_unavailable_range(mut self, start: i64, end: i64) -> Self {
         self.unavailable_ranges.push((start, end));
         self

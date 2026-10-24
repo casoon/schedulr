@@ -8,11 +8,20 @@ All of these work on a `CompiledProblem`, the result of `compile`.
 
 ## Solving
 
-`solve()` uses plain backtracking when the problem has no score rules and branch and bound when
-it has some. It uses unifier's default solver options, which include a time limit of ten
-seconds; a search that hits the limit returns `SolveStatus::Aborted` with the best solution found
-so far, if any. `statistics` reports the expanded nodes, the elapsed time and whether the result
-is proven optimal.
+`solve()` is `solve_with(&SolveOptions::default())`: a time limit of ten seconds, no
+cancellation token and the default `SolveStrategy`. Every strategy first constructs a schedule
+that satisfies the hard constraints; without score rules or goals that is the whole run.
+
+| `SolveStrategy` | After construction |
+| --- | --- |
+| `ConstructThenPortfolio` (default) | unifier's four-worker portfolio (backtracking, local search, LNS, branch and bound) improves the schedule for the remaining budget |
+| `ConstructThenOptimize` | branch and bound improves it; repeatable from run to run |
+| `OptimizeOnly` | no construction phase, one branch-and-bound run over the whole budget |
+
+A search that hits the limit returns `SolveStatus::Aborted` with the best feasible solution found
+so far, if any. A schedule that violates hard constraints is never returned as `solution`; the
+assignment such a run reached is kept in `best_effort`, and `check` explains it. `statistics`
+reports the expanded nodes, the elapsed time and whether the result is proven optimal.
 
 ## explain
 
@@ -71,6 +80,7 @@ window. The window must keep the activity's duration and stay inside its allowed
 - `is_feasible` and the blocking `hard_violations`,
 - advisory `warnings`,
 - `score_delta`, the score change the move would cause,
+- `score_components`, the score per rule after the move,
 - `explanations`, the conflict messages as text.
 
 `suggest(&solution, window)` runs `evaluate_move` for every activity and returns the feasible

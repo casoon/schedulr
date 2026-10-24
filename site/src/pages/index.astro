@@ -62,7 +62,7 @@ if result.status != SolveStatus::Feasible {
       { value: '1', label: 'dependency: the unifier constraint solver' },
       { value: '3', label: 'score levels, compared lexicographically' },
       { value: '0', label: 'solver searches for a single booking check' },
-      { value: '54', label: 'unit and integration tests on master' },
+      { value: '164', label: 'unit and integration tests' },
     ]}
   />
 
@@ -78,11 +78,11 @@ if result.status != SolveStatus::Feasible {
       },
       {
         title: 'Calendars and preferences',
-        body: 'Periodic slot templates with absolute exceptions decide when activities may start. Score rules on Strong, Medium and Weak levels express preferences, and every solution lists how each rule scored.',
+        body: 'Periodic slot templates with absolute exceptions decide when activities may start. Day and load rules shape the day of each person or room. Score rules, goals and soft forms of the hard rules express preferences on Strong, Medium and Weak levels, and every solution lists how each one scored.',
       },
       {
         title: 'Book, explain and repair',
-        body: 'SchedulingState checks one create, move or cancel without a search. For batch plans there are explain, analyze, evaluate_move, suggest, compare and a repair that changes as little as possible.',
+        body: 'SchedulingState checks one create, move or cancel without a search. For batch plans there are check, explain, analyze, evaluate_move, evaluate_changes, suggest, compare and a repair that changes as little as possible.',
       },
     ]}
   />
