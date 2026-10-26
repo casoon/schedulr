@@ -9,6 +9,13 @@ This file starts with 0.14.0; earlier releases are recorded by their git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **Website:** the [start page](https://casoon.github.io/schedulr/) shows a recorded run of the
+  `workshop_plan` example and a diagram of how a problem is compiled, solved and explained; the
+  full quickstart code lives in the
+  [documentation](https://casoon.github.io/schedulr/docs/getting-started/quickstart/).
+
 ### Fixed
 
 - **Explain:** `analyze` spreads demand over candidate resources and participants as exact

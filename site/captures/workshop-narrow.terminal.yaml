@@ -1,0 +1,19 @@
+# Narrow version of workshop.terminal.yaml for phones: the same run with the input, the status
+# and the score of each preference instead of the 69-column plan table. At 50 columns both long
+# lines wrap between words.
+version: 1
+terminal:
+  title: schedulr
+  cols: 50
+  rows: 13
+  theme: catppuccin-mocha
+steps:
+  - run: cargo run -q --example workshop_plan
+  - wait: 700
+  - show: ../../examples/output/workshop_plan.txt
+    lines: 1-4
+    lang: text
+  - show: ../../examples/output/workshop_plan.txt
+    lines: 22-26
+    lang: text
+  - wait: 6000

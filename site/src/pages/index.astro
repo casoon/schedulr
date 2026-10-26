@@ -2,45 +2,35 @@
 import {
   Badge,
   Badges,
-  BuildOutput,
+  Button,
   CodeBlock,
   Facts,
   Features,
   Hero,
   Install,
   Quickstart,
-  Terminal,
 } from '@casoon/pages-theme/components';
 import Base from '@casoon/pages-theme/layouts/Base.astro';
 import config from 'virtual:casoon-pages/config';
-import conflicts from '../../../examples/output/explain_conflicts.txt?raw';
-import plan from '../../../examples/output/workshop_plan.txt?raw';
+import { url } from '@casoon/pages-theme/url';
+// Animated SVGs built with castwright from site/captures/workshop*.terminal.yaml: excerpts of
+// examples/output/workshop_plan.txt, the captured run of the example. The narrow scene has 52
+// columns, so the text stays readable on phones.
+import workshopNarrowSvg from '../../captures/workshop-narrow.svg?url';
+import workshopSvg from '../../captures/workshop.svg?url';
+import Diagram from '../components/Diagram.astro';
 
-const quickstart = `use schedulr::{
-    Activity, ActivityId, Resource, ResourceId, ResourceRequirement,
-    SchedulingProblem, SolveStatus, TimeWindow, compile,
-};
-
-let room = Resource::new(ResourceId(1), "Physics lab", 1);
-let first = Activity::new(ActivityId(1), "first", TimeWindow::new(10, 20), 10)
-    .with_requirement(ResourceRequirement::new(room.id(), 1));
-let second = Activity::new(ActivityId(2), "second", TimeWindow::new(15, 25), 10)
-    .with_requirement(ResourceRequirement::new(room.id(), 1));
-
-let compiled = compile(&SchedulingProblem::new(vec![room], vec![], vec![first, second]))
-    .expect("problem compiles");
+const quickstart = `let compiled = compile(&problem).expect("problem compiles");
 let result = compiled.solve();
-if result.status != SolveStatus::Feasible {
-    for conflict in compiled.explain(&result) {
-        println!("{}: {}", conflict.constraint_name, conflict.message);
-    }
+for conflict in compiled.explain(&result) {
+    println!("{}: {}", conflict.constraint_name, conflict.message);
 }`;
 ---
 
 <Base>
   <Hero
     title="Describe the plan, let the solver place it."
-    lead="schedulr is a scheduling framework for Rust. You describe activities, resources, people and time windows as plain data; schedulr compiles them into a constraint model, solves it with unifier, and explains every conflict in the terms you used."
+    lead="schedulr is a scheduling framework for Rust. You describe activities, rooms, people and time windows as plain data; schedulr finds a plan that fits, and when none exists it tells you why, in your own names."
   >
     <Install
       commands={[
@@ -54,54 +44,146 @@ if result.status != SolveStatus::Feasible {
       <Badge>Rust 1.87+</Badge>
       <Badge>built on unifier 0.6</Badge>
     </Badges>
-    <Terminal slot="output" title="cargo run --example workshop_plan" dots ansi={plan} />
+    <picture slot="output" class="terminal-demo">
+      <source media="(max-width: 640px)" srcset={workshopNarrowSvg} width="444" height="278" />
+      <img
+        src={workshopSvg}
+        width="612"
+        height="404"
+        alt="Terminal: cargo run -q --example workshop_plan prints Status: Feasible (optimal: true) and the plan: Mon 09:00-10:00 a1 Kickoff in Room Aurora with Ana, Ben and Chris; Mon 10:00-12:00 a4 Solver deep dive in Room Aurora with Chris; Mon 13:00-16:00 a2 Rust fundamentals in Room Aurora with Ben; Tue 09:00-11:00 a3 Hands-on lab in Lab 1 with Ben; Tue 15:00-16:00 a5 Q&A in Room Aurora with Ana, Ben and Chris. Below it a timeline with one column per hour from 09 to 16 on Monday and Tuesday, one row per room and person. On a phone the scene shows the input instead (3 resources, 3 participants, 5 activities), the status and the score: hard 0, and 0 for each preference."
+      />
+    </picture>
   </Hero>
+
+  <Features
+    heading="Who it is for"
+    items={[
+      {
+        title: 'Course and training planners',
+        body: 'Sessions, rooms, trainers and a slot calendar with closed hours. schedulr places every session and picks the room and the trainer from the pools you allow.',
+      },
+      {
+        title: 'Booking applications',
+        body: 'One appointment at a time: check, book, move or cancel it against everything already booked, without running a solver search.',
+      },
+      {
+        title: 'Anyone who has to explain a no',
+        body: 'When no plan exists, schedulr names the rule, the activities and the room or person that collide, so the answer can go straight to the user.',
+      },
+    ]}
+  />
 
   <Facts
     items={[
       { value: '1', label: 'dependency: the unifier constraint solver' },
-      { value: '3', label: 'score levels, compared lexicographically' },
+      { value: '3', label: 'preference levels: Strong, Medium, Weak' },
       { value: '0', label: 'solver searches for a single booking check' },
       { value: '164', label: 'unit and integration tests' },
     ]}
   />
 
+  <section class="how" aria-labelledby="how-heading">
+    <h2 id="how-heading">How it works</h2>
+    <div class="text">
+      <p>
+        A <code>SchedulingProblem</code> is plain data: activities with their time windows and
+        durations, the rooms and people they need, calendars, rules and goals. <code>compile</code>
+        checks it and turns it into a constraint model for unifier.
+      </p>
+      <p>
+        <code>solve</code> builds a feasible plan first, then improves it with the time that is
+        left. Without a plan, <code>explain</code> lists the conflicts. Single bookings skip the
+        search: <code>SchedulingState</code> checks one create or move against what is booked.
+      </p>
+    </div>
+    <Diagram name="how-it-works" format="svg" narrow={{ width: 420, height: 540 }} />
+    <div class="links">
+      <Button href={url('docs/guides/modeling/')} variant="secondary">Modeling a problem</Button>
+      <Button href={url('docs/guides/analysis-and-repair/')} variant="secondary">Analysis and repair</Button>
+      <Button href={url('showcase/')} variant="quiet">All examples →</Button>
+    </div>
+  </section>
+
   <Features
+    heading="What you get"
     items={[
       {
         title: 'Domain types, not solver variables',
-        body: 'Resources, participants, activities, requirements and time windows are the whole public model. Solutions and conflicts come back in the same vocabulary, with your ids and names.',
-      },
-      {
-        title: 'Let the solver choose rooms and people',
-        body: 'Requirements can name an exact resource or ask for any resource of a type, with features, a minimum capacity or from a named pool. Participants come from pools, candidate lists or nested, overlapping groups.',
+        body: 'Resources, participants, activities, requirements and time windows are the whole model. Plans and conflicts come back in the same vocabulary, with your ids and names.',
       },
       {
         title: 'Calendars and preferences',
-        body: 'Periodic slot templates with absolute exceptions decide when activities may start. Day and load rules shape the day of each person or room. Score rules, goals and soft forms of the hard rules express preferences on Strong, Medium and Weak levels, and every solution lists how each one scored.',
+        body: 'Slot calendars with exceptions decide when activities may start. Day rules shape each person’s day, and preferences on three levels are scored one by one.',
       },
       {
         title: 'Book, explain and repair',
-        body: 'SchedulingState checks one create, move or cancel without a search. For batch plans there are check, explain, analyze, evaluate_move, evaluate_changes, suggest, compare and a repair that changes as little as possible.',
+        body: 'Check a finished plan, ask what a move would break, get suggestions, and repair a plan with as few changes as possible.',
       },
     ]}
   />
 
-  <BuildOutput
-    caption="Captured from the example programs in the repository by scripts/regenerate-examples.sh. Every output on this site comes from schedulr itself."
-    file="examples/output/explain_conflicts.txt"
-  >
-    <Terminal title="cargo run --example explain_conflicts" ansi={conflicts} />
-  </BuildOutput>
-
   <Quickstart
-    lead="Three steps from a problem description to a plan or an explanation. The documentation covers the full DSL."
+    lead="From a problem description to a plan or an explanation. The quickstart in the documentation builds the problem step by step."
     steps={[
       'Add <code>schedulr</code> to your crate.',
-      'Describe resources, participants and activities, then <code>compile</code> the problem.',
-      'Call <code>solve()</code> and read the assignments, or <code>explain()</code> why no plan exists.',
+      'Describe resources, participants and activities in a <code>SchedulingProblem</code>.',
+      'Call <code>compile</code> and <code>solve()</code>, then read the assignments, or <code>explain()</code> why no plan exists.',
     ]}
   >
-    <CodeBlock code={quickstart} lang="rust" title="main.rs" label="Rust" />
+    <div class="qs">
+      <CodeBlock code={quickstart} lang="rust" title="main.rs" label="Rust" />
+      <Button href={url('docs/getting-started/quickstart/')} variant="secondary">Read the quickstart</Button>
+    </div>
   </Quickstart>
 </Base>
+
+<style>
+  .terminal-demo img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .how {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+  h2 {
+    margin: 0 0 14px;
+    color: var(--heading);
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .text {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+    gap: 0 48px;
+  }
+  .text p {
+    margin: 0 0 16px;
+    font-size: 15.5px;
+  }
+  .text code {
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--code-bg);
+    font-size: 13.5px;
+  }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+  .qs {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    min-width: 0;
+  }
+  .qs > :global(*:first-child) {
+    align-self: stretch;
+  }
+</style>
