@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "type": "flow",
+  "title": "How schedulr works",
+  "description": "A SchedulingProblem holds activities, resources, participants, calendars, rules and goals. compile validates it and builds a unifier constraint model; invalid input comes back as one CompileError with every message. solve constructs a feasible schedule first and optimizes it with the remaining time budget. A feasible result is a Solution with the assignments and the score of every rule; without one, explain returns the conflicts, named after your resources, participants and activities.",
+  "source": "src/model.rs (SchedulingProblem), src/batch.rs (compile, solve, explain)",
+  "width": 1100,
+  "height": 250,
+  "flow": {
+    "nodes": [
+      {
+        "id": "problem",
+        "label": "SchedulingProblem",
+        "sublabel": "activities, rooms, people",
+        "kind": "start"
+      },
+      {
+        "id": "compile",
+        "label": "compile",
+        "sublabel": "builds the unifier model"
+      },
+      {
+        "id": "solve",
+        "label": "solve",
+        "sublabel": "construct, then optimize"
+      },
+      {
+        "id": "solution",
+        "label": "Solution",
+        "sublabel": "assignments, scores",
+        "kind": "end"
+      },
+      {
+        "id": "error",
+        "label": "CompileError",
+        "sublabel": "every message at once",
+        "kind": "end"
+      },
+      {
+        "id": "conflicts",
+        "label": "Conflicts",
+        "sublabel": "in your names",
+        "kind": "end"
+      }
+    ],
+    "edges": [
+      {
+        "from": "problem",
+        "to": "compile"
+      },
+      {
+        "from": "compile",
+        "to": "solve"
+      },
+      {
+        "from": "compile",
+        "to": "error",
+        "label": "invalid input"
+      },
+      {
+        "from": "solve",
+        "to": "solution",
+        "label": "feasible"
+      },
+      {
+        "from": "solve",
+        "to": "conflicts",
+        "label": "explain()"
+      }
+    ],
+    "mainPath": [
+      "problem",
+      "compile",
+      "solve",
+      "solution"
+    ],
+    "orientation": "landscape"
+  }
+}

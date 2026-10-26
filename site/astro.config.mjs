@@ -26,6 +26,7 @@ export default defineConfig({
         reference: 'Reference',
       },
       changelog: '../CHANGELOG.md',
+      mdxComponents: './src/mdx-components.ts',
     }),
   ],
 });
