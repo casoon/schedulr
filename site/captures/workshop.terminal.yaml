@@ -1,0 +1,20 @@
+# The start-page scene: excerpts of examples/output/workshop_plan.txt, the captured run of
+# `cargo run --example workshop_plan` (scripts/regenerate-examples.sh). Lines are shown as
+# captured, nothing is reworded: the status, the plan and the timeline. Rebuild after a new
+# capture:
+#   cd site/captures && for f in workshop.terminal.yaml workshop-narrow.terminal.yaml; do
+#     npx -y -p @casoon/castwright@0.5.0 -p shiki castwright build "$f" --format svg -o .; done
+version: 1
+terminal:
+  title: schedulr
+  cols: 70
+  rows: 20
+  theme: catppuccin-mocha
+steps:
+  - run: cargo run -q --example workshop_plan
+  - wait: 700
+  - show: ../../examples/output/workshop_plan.txt
+    lines: 4-21
+    lang: text
+    delay: 60
+  - wait: 6000
