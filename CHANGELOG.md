@@ -15,7 +15,7 @@ This file starts with 0.14.0; earlier releases are recorded by their git tags.
   `workshop_plan` example and a diagram of how a problem is compiled, solved and explained; the
   full quickstart code lives in the
   [documentation](https://casoon.github.io/schedulr/docs/getting-started/quickstart/).
-- **Website:** the project site uses the current shared theme (0.12.12); the footer follows the page
+- **Website:** the project site uses the current shared theme (0.12.14); the footer follows the page
   language.
 
 ### Fixed
