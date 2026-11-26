@@ -113,6 +113,10 @@ if result.status != SolveStatus::Feasible {
 schedulr = "0.14"
 ```
 
+## Author
+
+Built and maintained by [Jörn Seidel](https://www.casoon.de/joern-seidel/) ([CASOON](https://www.casoon.de/)). Background and design decisions are described in an article on Insights (in German): [schedulr: Stundenplan und Praxistermin als Constraint-Problem](https://insights.casoon.de/artikel/schedulr-terminplanung-als-constraint-problem/).
+
 ## License
 
 MIT — see [LICENSE](https://github.com/casoon/schedulr/blob/master/LICENSE).
